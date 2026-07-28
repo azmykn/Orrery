@@ -8,8 +8,8 @@
 //! or llama.cpp (server path + GGUF download), switchable in-app.
 
 use gpui::{
-    AppContext, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    AppContext, ClipboardItem, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use gpui_component::input::{Input, InputState};
 use orrery_core::model::AppConfig;
@@ -127,7 +127,10 @@ pub fn render(
     let show = |section: &str| filter.is_none() || filter == Some(section);
     let mut sections: Vec<gpui::AnyElement> = Vec::new();
     if show("account") {
-        sections.push(account_section(authed, device, t, app).into_any_element());
+        sections.push(
+            account_section(authed, device, s.draft.github_allow_cli_token, t, app)
+                .into_any_element(),
+        );
     }
     if show("roots") {
         sections.push(roots_section(s, t, app).into_any_element());
@@ -188,10 +191,15 @@ pub fn render(
 fn account_section(
     authed: bool,
     device: &Option<GithubDevice>,
+    allow_cli: bool,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
+    use orrery_core::oauth::{self, GithubTokenSource};
+
     let mut col = section(t, "GitHub account");
+    let source = oauth::github_token_source().map(|(_, s)| s);
+    let signed_out = oauth::is_signed_out();
 
     if let Some(d) = device {
         // A device-flow login is in progress: show the code + verification URL.
@@ -207,8 +215,13 @@ fn account_section(
                     .flex_row()
                     .items_center()
                     .gap(px(10.))
-                    .child(
+                    .child({
+                        let code = d.user_code.clone();
+                        let app = app.clone();
+                        let (hb, hc) = (t.surface_hover, t.border_strong);
                         div()
+                            // Unique id — duplicate interactive ids break click routing in GPUI.
+                            .id("github-device-user-code")
                             .px(px(10.))
                             .py(px(6.))
                             .rounded(px(t.r_sm))
@@ -218,57 +231,174 @@ fn account_section(
                             .font_family("monospace")
                             .text_size(px(t.text_h3))
                             .text_color(rgb(t.fg0))
-                            .child(d.user_code.clone()),
-                    )
-                    .child(button("Open page", t, move |_cx| {
-                        let _ = orrery_core::launch::open(&uri);
-                    })),
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(rgb(hb)).border_color(rgb(hc)))
+                            .child(code.clone())
+                            .on_click(move |_ev, _win, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                                app.update(cx, |this, cx| {
+                                    this.push_toast(
+                                        crate::toast::ToastKind::Success,
+                                        "Code copied",
+                                        None,
+                                        cx,
+                                    );
+                                });
+                            })
+                    })
+                    .child(button_id(
+                        "btn-github-open-verify",
+                        "Open page",
+                        t,
+                        move |_cx| {
+                            let _ = orrery_core::launch::open(&uri);
+                        },
+                    )),
             )
             .child(note_line(d.status.clone(), t.fg3, t));
     } else if authed {
+        let source = source.unwrap_or(GithubTokenSource::OrreryOAuth);
         col = col
             .child(status_row(
                 "circle-check",
-                "Connected to GitHub",
+                format!("Connected to GitHub · via {}", source.label()),
                 t.clean,
                 t,
             ))
             .child(note_line(
                 SharedString::from(
-                    "Powers Inbox, Explore, PR actions, and CI badges. Pull/Push still use your git credentials (SSH or credential helper), not this link. Org remotes may need SSO authorization for the Orrery app; CI needs Actions read (`repo` on classic tokens).",
+                    "Powers Inbox, Explore, PR actions, and CI badges. Pull/Push still use your git credentials (SSH or credential helper), not this link.",
                 ),
                 t.fg3,
                 t,
-            ))
-            .child(div().child(button("Sign out", t, {
-                let app = app.clone();
-                move |cx| {
-                    app.update(cx, |this, cx| this.github_sign_out(cx));
-                }
-            })));
+            ));
+        col = match source {
+            GithubTokenSource::OrreryOAuth => {
+                let sso_url = oauth::github_oauth_app_settings_url();
+                let open_url = sso_url.clone();
+                col.child(note_line(
+                    SharedString::from(
+                        "Org remotes: open the Orrery OAuth app and click Authorize for each org (SSO). CI uses the classic `repo` scope from Connect.",
+                    ),
+                    t.fg3,
+                    t,
+                ))
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg2))
+                        .child(SharedString::from(sso_url)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .child(button_id("btn-github-sso", "Authorize org SSO", t, move |_cx| {
+                            let _ = orrery_core::launch::open(&open_url);
+                        }))
+                        .child(button_id("btn-github-sign-out", "Sign out", t, {
+                            let app = app.clone();
+                            move |cx| {
+                                app.update(cx, |this, cx| this.github_sign_out(cx));
+                            }
+                        })),
+                )
+            }
+            GithubTokenSource::EnvVar | GithubTokenSource::GhCli => col
+                .child(note_line(
+                    SharedString::from(
+                        "Connected via machine token — GitHub → Settings → Applications may not list Orrery. CI needs Actions:read (fine-grained) or classic `repo`. Prefer Connect with Orrery for Inbox/CI without changing `gh`.",
+                    ),
+                    t.fg3,
+                    t,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .child(button_id(
+                            "btn-github-prefer-oauth",
+                            "Use Orrery login instead",
+                            t,
+                            {
+                                let app = app.clone();
+                                move |cx| {
+                                    app.update(cx, |this, cx| this.github_prefer_oauth(cx));
+                                }
+                            },
+                        ))
+                        .child(button_id("btn-github-sign-out", "Sign out", t, {
+                            let app = app.clone();
+                            move |cx| {
+                                app.update(cx, |this, cx| this.github_sign_out(cx));
+                            }
+                        })),
+                ),
+        };
     } else {
         col = col
             .child(status_row(
                 "circle-alert",
-                "Not connected — sign in to use Inbox, Feed, Explore, PR actions, and CI.",
+                if signed_out {
+                    "Not connected — signed out of Orrery (machine `gh` / env left alone)."
+                } else {
+                    "Not connected — sign in to use Inbox, Feed, Explore, PR actions, and CI."
+                },
                 t.fg3,
                 t,
             ))
             .child(note_line(
                 SharedString::from(
-                    "Sign-in requests read:user + repo (private repos and Actions/CI).",
+                    "Connect requests read:user + repo (private repos and Actions/CI). Sign out only affects Orrery — it never runs `gh auth logout`.",
                 ),
                 t.fg3,
                 t,
             ))
-            .child(div().child(button("Connect GitHub", t, {
-                let app = app.clone();
-                move |cx| {
-                    app.update(cx, |this, cx| this.github_connect(cx));
-                }
-            })));
+            .child(
+                div().child(button_id("btn-github-connect", "Connect GitHub", t, {
+                    let app = app.clone();
+                    move |cx| {
+                        app.update(cx, |this, cx| this.github_connect(cx));
+                    }
+                })),
+            );
+        if signed_out {
+            col = col.child(note_line(
+                SharedString::from(
+                    "To use `gh` / ORRERY_GITHUB_TOKEN again without Orrery OAuth, turn on “Also use `gh` / env token” below.",
+                ),
+                t.fg3,
+                t,
+            ));
+        }
     }
-    col
+
+    col.child(toggle(
+        "Also use `gh` / env token",
+        allow_cli,
+        t,
+        app,
+        |this| {
+            let on = !this
+                .settings
+                .as_ref()
+                .map(|s| s.draft.github_allow_cli_token)
+                .unwrap_or(this.config.github_allow_cli_token);
+            this.github_set_allow_cli_token(on);
+        },
+    ))
+    .child(note_line(
+        SharedString::from(
+            "When off, only an Orrery Connect token is used. Sign out always stops API calls until Connect or you turn this back on.",
+        ),
+        t.fg3,
+        t,
+    ))
 }
 
 // ── sections ────────────────────────────────────────────────────────────────
@@ -950,9 +1080,18 @@ fn number_row(label: &str, input: &Entity<InputState>, t: &Theme) -> impl IntoEl
 }
 
 fn button(label: &str, t: &Theme, on: impl Fn(&mut gpui::App) + 'static) -> impl IntoElement {
+    button_id(format!("btn-{label}"), label, t, on)
+}
+
+fn button_id(
+    id: impl Into<SharedString>,
+    label: &str,
+    t: &Theme,
+    on: impl Fn(&mut gpui::App) + 'static,
+) -> impl IntoElement {
     let (hb, hf) = (t.border_strong, t.fg0);
     div()
-        .id(SharedString::from(format!("btn-{label}")))
+        .id(id.into())
         .px(px(14.))
         .py(px(7.))
         .rounded(px(t.r_sm))

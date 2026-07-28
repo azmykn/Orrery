@@ -124,6 +124,12 @@ pub struct AppConfig {
     /// GitHub OAuth app client id for the device-flow login (optional).
     #[serde(default)]
     pub github_client_id: String,
+    /// When true (default), Orrery may use `$ORRERY_GITHUB_TOKEN` or `gh auth
+    /// token` if no Orrery OAuth token is stored. Sign out still blocks these
+    /// until Connect or the user turns this back on (clears the signed-out
+    /// marker). Never runs `gh auth logout`.
+    #[serde(default = "default_true")]
+    pub github_allow_cli_token: bool,
     /// Trusted self-hosted GitLab domains. A token is only ever sent to
     /// gitlab.com or a domain on this list, so a malicious repo remote can't
     /// exfiltrate it to an arbitrary host.

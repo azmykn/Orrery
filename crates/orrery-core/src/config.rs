@@ -69,6 +69,7 @@ impl Default for AppConfig {
             agent_command,
             agent_dispatch_args: crate::model::default_agent_dispatch_args(),
             github_client_id: String::new(),
+            github_allow_cli_token: true,
             gitlab_hosts: Vec::new(),
             ai_model: crate::model::default_ai_model(),
             ai_enabled: true,

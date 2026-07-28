@@ -1,8 +1,8 @@
 //! Cross-host "dev inbox" (Phase 7): the things a dev checks constantly — open
 //! PRs, review requests, assigned issues, host notifications, CI status, and
 //! starred repos. GitHub is implemented via its REST/search API using the
-//! resolved token (stored OAuth → env → `gh`); GitLab support can layer on the
-//! same shapes later.
+//! resolved token (Orrery OAuth → unless signed out → env/`gh` when allowed);
+//! GitLab support can layer on the same shapes later.
 
 use serde::{Deserialize, Serialize};
 
@@ -1249,11 +1249,8 @@ fn ci_error_for_status(
     if status == reqwest::StatusCode::FORBIDDEN {
         // Linked ≠ authorized for Actions: org SSO, blocked OAuth app, stale
         // token without `repo`, or a fine-grained PAT missing Actions:read.
-        // Prefer a short actionable hint over GitHub's varying body text.
-        return Some(
-            "GitHub CI 403 — can't read Actions (reconnect in Settings, authorize org SSO, or grant Actions:read on a PAT)"
-                .into(),
-        );
+        // Hint text depends on whether the token is Orrery OAuth vs gh/PAT.
+        return Some(oauth::ci_forbidden_hint());
     }
     if let Some(msg) = body_msg.filter(|m| !m.is_empty()) {
         return Some(format!("GitHub CI {status}: {msg}"));

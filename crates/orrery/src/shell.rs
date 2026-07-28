@@ -1502,12 +1502,49 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Forget the stored GitHub token.
+    /// Forget Orrery's stored GitHub token and stop using env/`gh` fallbacks
+    /// until Connect again. Does not touch `gh auth` or machine credentials.
     pub fn github_sign_out(&mut self, cx: &mut Context<Self>) {
         orrery_core::oauth::sign_out();
+        // Flip the fallback toggle off so "turn it back on" clearly re-enables
+        // `gh`/env after Sign out (signed-out alone already blocks them).
+        self.config.github_allow_cli_token = false;
+        if let Some(s) = &mut self.settings {
+            s.draft.github_allow_cli_token = false;
+        }
+        let _ = orrery_core::config::save(&self.config);
         self.services.github_device = None;
         self.services.github_authed = orrery_core::oauth::github_authed();
+        self.push_toast(
+            ToastKind::Success,
+            "Signed out of Orrery",
+            Some("Connect GitHub to sign in again. Your gh CLI login is unchanged.".into()),
+            cx,
+        );
         cx.notify();
+    }
+
+    /// Prefer Orrery device-flow OAuth over the current `gh`/env token: start
+    /// Connect; on success the stored token takes priority without touching `gh`.
+    pub fn github_prefer_oauth(&mut self, cx: &mut Context<Self>) {
+        orrery_core::oauth::clear_signed_out();
+        self.services.github_device = None;
+        self.github_connect(cx);
+    }
+
+    /// Persist whether Orrery may fall back to `$ORRERY_GITHUB_TOKEN` / `gh`.
+    /// Turning it **on** clears the Orrery-only signed-out marker so a previous
+    /// Sign out can use machine credentials again without `gh auth login`.
+    pub fn github_set_allow_cli_token(&mut self, on: bool) {
+        self.config.github_allow_cli_token = on;
+        if let Some(s) = &mut self.settings {
+            s.draft.github_allow_cli_token = on;
+        }
+        let _ = orrery_core::config::save(&self.config);
+        if on {
+            orrery_core::oauth::clear_signed_out();
+        }
+        self.services.github_authed = orrery_core::oauth::github_authed();
     }
 
     /// Re-check AI-backend reachability and list installed models.
