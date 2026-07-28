@@ -1409,9 +1409,7 @@ mod tests {
         {
             let repo = Repository::open(&path).unwrap();
             let mut index = repo.index().unwrap();
-            index
-                .add_path(std::path::Path::new("staged.txt"))
-                .unwrap();
+            index.add_path(std::path::Path::new("staged.txt")).unwrap();
             index.write().unwrap();
         }
         fs::write(root.join("untracked.txt"), "gone").unwrap();
@@ -1419,13 +1417,13 @@ mod tests {
         fs::write(root.join("untracked_dir/nested.txt"), "gone").unwrap();
         assert!(status_of(&Repository::open(&path).unwrap()).dirty > 0);
 
-        assert!(matches!(
-            discard_all_changes(&path),
-            Ok(OpOutcome::Done(_))
-        ));
+        assert!(matches!(discard_all_changes(&path), Ok(OpOutcome::Done(_))));
         let after = status_of(&Repository::open(&path).unwrap());
         assert_eq!(after.dirty, 0);
-        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Test");
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).unwrap(),
+            "# Test"
+        );
         assert!(!root.join("staged.txt").exists());
         assert!(!root.join("untracked.txt").exists());
         assert!(!root.join("untracked_dir").exists());

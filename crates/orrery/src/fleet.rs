@@ -195,9 +195,19 @@ impl OrreryApp {
         self.fleet_commit = None;
     }
 
-    /// Select every row passing the current filters (the fleet bar's
-    /// "Select all"). Adds to the existing selection rather than replacing it,
-    /// so a hand-picked repo outside the filter isn't dropped.
+    /// True when every currently visible/filtered row is in the selection
+    /// (and there is at least one). Drives the Mission Control select-all checkbox.
+    pub fn all_visible_selected(&self) -> bool {
+        let visible = self.visible_rows();
+        !visible.is_empty()
+            && visible
+                .iter()
+                .all(|&i| self.selected.contains(&self.rows[i].id))
+    }
+
+    /// Select every row passing the current filters. Adds to the existing
+    /// selection rather than replacing it, so a hand-picked repo outside the
+    /// filter isn't dropped.
     pub fn select_all_visible(&mut self, cx: &mut Context<Self>) {
         self.fleet_prune = None;
         self.fleet_reset = None;
@@ -208,6 +218,16 @@ impl OrreryApp {
             self.selected.insert(id);
         }
         cx.notify();
+    }
+
+    /// Checkbox toggle: select all visible repos, or clear the selection when
+    /// they are already all selected.
+    pub fn toggle_select_all_visible(&mut self, cx: &mut Context<Self>) {
+        if self.all_visible_selected() {
+            self.clear_selection(cx);
+        } else {
+            self.select_all_visible(cx);
+        }
     }
 
     /// Replace the selection with the repos matching `pred` — the palette's
@@ -770,12 +790,8 @@ impl OrreryApp {
     /// until a selection exists or a run is active. Buttons disable while a
     /// run is in flight (one bulk run at a time — replaced by a live counter
     /// and Cancel) and while a prune confirm strip is pending above the bar.
-    pub fn fleet_bar(
-        &self,
-        t: &Theme,
-        cx: &mut Context<Self>,
-        visible: usize,
-    ) -> Option<gpui::AnyElement> {
+    /// Select-all lives on the filter chip row (checkbox beside "All"), not here.
+    pub fn fleet_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.selected.is_empty()
             && self.fleet_run.is_none()
             && self.fleet_discard.is_none()
@@ -838,17 +854,7 @@ impl OrreryApp {
                     cx.listener(|this, _e, _w, cx| this.cancel_fleet(cx)),
                 ));
         }
-        let select_all = format!("Select all ({visible})");
         bar = bar
-            .child(bar_btn(
-                "fleet-select-all",
-                "circle-check",
-                &select_all,
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.select_all_visible(cx)),
-            ))
             .child(bar_btn(
                 "fleet-fetch",
                 "refresh-cw",

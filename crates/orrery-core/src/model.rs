@@ -251,3 +251,17 @@ pub(crate) fn default_embed_model() -> String {
 pub(crate) fn default_true() -> bool {
     true
 }
+
+#[cfg(test)]
+mod pull_only_tests {
+    use super::path_is_pull_only;
+
+    #[test]
+    fn path_is_pull_only_matches_prefix() {
+        let prefixes = vec!["/home/u/odoo/core".into()];
+        assert!(path_is_pull_only("/home/u/odoo/core/enterprise", &prefixes));
+        assert!(path_is_pull_only("/home/u/odoo/core", &prefixes));
+        assert!(!path_is_pull_only("/home/u/odoo/digits/alreef", &prefixes));
+        assert!(!path_is_pull_only("/home/u/odoo/corex", &prefixes));
+    }
+}

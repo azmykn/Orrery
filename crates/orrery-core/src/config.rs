@@ -124,9 +124,12 @@ pub fn seed_odoo_groups_if_empty(cfg: &mut AppConfig) -> bool {
     true
 }
 
-/// If `pull_only_prefixes` is empty, seed Odoo `core/` + `custom/` under each
-/// root (vendor / third-party — Pull, don't Push). Leaves `digits/` writable.
-/// Returns true when prefixes were added (caller should persist).
+/// If `pull_only_prefixes` is empty, seed upstream / vendor trees:
+///
+/// - Odoo layout: `<root>/core` and `<root>/custom` when those dirs exist
+/// - Or the root itself when it already *is* a `core` / `custom` folder
+///
+/// Leaves `digits/` writable. Returns true when prefixes were added.
 pub fn seed_pull_only_if_empty(cfg: &mut AppConfig) -> bool {
     if !cfg.pull_only_prefixes.is_empty() {
         return false;
@@ -134,6 +137,16 @@ pub fn seed_pull_only_if_empty(cfg: &mut AppConfig) -> bool {
     let mut prefixes = Vec::new();
     for root in &cfg.roots {
         let root_path = crate::scan::expand(root);
+        let name = root_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        // Roots that *are* core/custom (DigitsCode layout lists them separately).
+        if name == "core" || name == "custom" {
+            prefixes.push(root_path.to_string_lossy().into_owned());
+            continue;
+        }
         for sub in ["core", "custom"] {
             let p = root_path.join(sub);
             if p.is_dir() {

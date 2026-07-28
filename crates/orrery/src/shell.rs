@@ -3634,6 +3634,31 @@ impl OrreryApp {
         self.run_fleet_repos(op, repos, cx);
     }
 
+    /// Fleet-pull every repo that is behind its upstream (palette + toolbar).
+    pub fn pull_behind_repos(&mut self, cx: &mut Context<Self>) {
+        let repos: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.behind > 0)
+            .map(|r| r.id.to_string())
+            .collect();
+        if repos.is_empty() {
+            self.push_toast(
+                crate::toast::ToastKind::Info,
+                "Nothing behind",
+                Some("Every repo is up to date with its upstream.".into()),
+                cx,
+            );
+        } else {
+            self.run_fleet_repos(crate::fleet::FleetOp::Pull, repos, cx);
+        }
+    }
+
+    /// True when this checkout is under a configured pull-only (upstream) path.
+    pub fn is_pull_only(&self, repo_id: &str) -> bool {
+        orrery_core::model::path_is_pull_only(repo_id, &self.config.pull_only_prefixes)
+    }
+
     /// Force-refresh host enrichment for every repo (ignores the TTL), then
     /// reload the grid. The toolbar's "Fetch all".
     pub fn fetch_all_hosts(&mut self, cx: &mut Context<Self>) {
@@ -5284,7 +5309,8 @@ impl OrreryApp {
         let visible = self.visible_rows();
         // The fleet bar (multi-select bulk ops) pins under the scrolling cards;
         // `None` (no element at all) until a selection exists or a run is live.
-        let fleet_bar = self.fleet_bar(t, cx, visible.len());
+        // Select-all is the checkbox beside the All filter chip (above the list).
+        let fleet_bar = self.fleet_bar(t, cx);
         div()
             .flex()
             .flex_col()
@@ -5408,7 +5434,8 @@ impl OrreryApp {
         bar
     }
 
-    /// The single-select quick-filter chips (All / Public / … / Stale).
+    /// The single-select quick-filter chips (All / Public / … / Stale), with a
+    /// select-all checkbox immediately before the All chip.
     fn filter_chips(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div()
             .flex()
@@ -5419,6 +5446,8 @@ impl OrreryApp {
             .px(px(16.))
             .py(px(12.));
         let hov = t.border_strong;
+        // Select-all beside All — same visual language as card selection boxes.
+        row = row.child(self.select_all_checkbox(t, cx));
         for f in RepoFilter::ORDER {
             let active = self.grid.filter == f;
             let (bg, border, fg) = if active {
@@ -5449,6 +5478,47 @@ impl OrreryApp {
             row = row.child(chip.child(SharedString::from(f.label())));
         }
         row
+    }
+
+    /// Fleet select-all checkbox at the top of the repo list (next to All).
+    /// Unique id `mc-select-all` — must not collide with card checkboxes.
+    fn select_all_checkbox(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.all_visible_selected();
+        let idle = self.fleet_run.is_none()
+            && self.fleet_prune.is_none()
+            && self.fleet_reset.is_none()
+            && self.fleet_discard.is_none()
+            && self.fleet_commit.is_none();
+        let (border_c, bg_c) = if selected {
+            (t.primary, t.primary)
+        } else {
+            (t.border_strong, t.button_bg)
+        };
+        let hov = t.primary;
+        let mut b = div()
+            .id("mc-select-all")
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(16.))
+            .h(px(16.))
+            .rounded(px(t.r_xs))
+            .border_1()
+            .border_color(rgb(border_c))
+            .bg(rgb(bg_c));
+        if idle {
+            b = b
+                .cursor_pointer()
+                .hover(move |s| s.border_color(rgb(hov)))
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    this.toggle_select_all_visible(cx);
+                }));
+        }
+        if selected {
+            b = b.child(lucide("check", 12., t.page));
+        }
+        b
     }
 
     fn card_list(
@@ -5983,8 +6053,8 @@ mod tests {
         assert!(
             subtitle
                 .as_ref()
-                .is_some_and(|s| s.as_ref().contains("CiFailing")),
-            "subtitle uses top item summary"
+                .is_some_and(|s| s.as_ref().contains("CiFailing") && s.as_ref().contains("Open CI")),
+            "subtitle uses top item summary + action hint"
         );
 
         let quiet = SharedString::from("/missing");

@@ -341,7 +341,9 @@ pub fn apply_pull_only_policy(
             match item.kind {
                 AttentionKind::CiFailing if pull_only => None,
                 AttentionKind::Ahead if pull_only => {
-                    item.summary = item.summary.replace("not pushed", "local only — don't push");
+                    item.summary = item
+                        .summary
+                        .replace("not pushed", "local only — don't push");
                     if item.detail.is_none() {
                         item.detail = Some("upstream / pull-only checkout".into());
                     }
@@ -789,6 +791,73 @@ mod tests {
         ] {
             assert_eq!(kind.label(), label, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn every_kind_has_an_action_hint() {
+        use AttentionKind::*;
+        assert_eq!(Behind.action_hint(), "Pull to update");
+        assert_eq!(DirtyWorktree.action_hint(), "Commit locally or discard");
+        for kind in [
+            CiFailing,
+            ReviewRequested,
+            AgentFinished,
+            DirtyWorktree,
+            Ahead,
+            Behind,
+            PrAssigned,
+            PrunableBranches,
+            AgentRunning,
+        ] {
+            assert!(!kind.action_hint().is_empty(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn pull_only_policy_drops_ci_and_rewrites_ahead_behind() {
+        let items = vec![
+            item(
+                local_ref(&repo("/work/core/enterprise")),
+                AttentionKind::CiFailing,
+                "CI failing on the default branch".into(),
+                None,
+            ),
+            item(
+                local_ref(&repo("/work/core/enterprise")),
+                AttentionKind::Ahead,
+                "2 commits not pushed".into(),
+                None,
+            ),
+            item(
+                local_ref(&repo("/work/core/enterprise")),
+                AttentionKind::Behind,
+                "3 commits behind upstream".into(),
+                None,
+            ),
+            item(
+                local_ref(&repo("/work/digits/mine")),
+                AttentionKind::CiFailing,
+                "CI failing on the default branch".into(),
+                None,
+            ),
+        ];
+        let prefixes = vec!["/work/core".into()];
+        let out = apply_pull_only_policy(items, &prefixes);
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|i| !(i.kind == AttentionKind::CiFailing
+            && i.repo.id.as_deref() == Some("/work/core/enterprise"))));
+        let ahead = out
+            .iter()
+            .find(|i| i.kind == AttentionKind::Ahead)
+            .expect("ahead kept");
+        assert!(ahead.summary.contains("don't push"));
+        let behind = out
+            .iter()
+            .find(|i| i.kind == AttentionKind::Behind)
+            .expect("behind");
+        assert!(behind.summary.contains("Pull to update"));
+        assert!(out.iter().any(|i| i.kind == AttentionKind::CiFailing
+            && i.repo.id.as_deref() == Some("/work/digits/mine")));
     }
 
     #[test]

@@ -236,8 +236,9 @@ pub fn reset_hard_op() -> impl Fn(&str) -> Outcome + Sync {
 }
 
 /// Discard working-tree + index changes relative to HEAD (`reset --hard HEAD`
-/// + `clean -fd`). Keeps commits; skips clean trees. Distinct from
-/// [`reset_hard_op`] (upstream).
+/// + `clean -fd`). Keeps commits; skips clean trees.
+///
+/// Distinct from [`reset_hard_op`] (which resets to upstream).
 pub fn discard_changes_op() -> impl Fn(&str) -> Outcome + Sync {
     |path| match git_ops::discard_all_changes(path) {
         Ok(OpOutcome::Done(s)) => Outcome::Ok(s),
