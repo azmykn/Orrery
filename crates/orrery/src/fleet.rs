@@ -1296,7 +1296,8 @@ fn generate_and_commit_op() -> impl Fn(&str) -> Outcome + Sync {
         }
         let msg = crate::task::block_on({
             let diff = diff.clone();
-            async move { orrery_core::ai::commit_message(&diff).await }
+            let path = path.to_string();
+            async move { orrery_core::ai::commit_message(&path, &diff).await }
         });
         let message = match msg {
             Ok(m) => m,

@@ -1858,7 +1858,8 @@ impl OrreryApp {
             }
             let msg = crate::task::run({
                 let diff = diff.clone();
-                async move { orrery_core::ai::commit_message(&diff).await }
+                let id = id.clone();
+                async move { orrery_core::ai::commit_message(&id, &diff).await }
             })
             .await;
             let _ = this.update(cx, |this, cx| match msg {
@@ -1924,24 +1925,25 @@ impl OrreryApp {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let id = repo.to_string();
+            let id_for_diff = id.clone();
             let diff = cx
                 .background_executor()
                 .spawn(async move {
                     // Prefer the full working tree (what Commit All will record).
                     // Fall back to staged-only if somehow workdir is empty but
                     // the index isn't (shouldn't happen, but cheap).
-                    let full = orrery_core::git_ops::working_diff(&id).unwrap_or_default();
+                    let full = orrery_core::git_ops::working_diff(&id_for_diff).unwrap_or_default();
                     if !full.trim().is_empty() {
                         full
                     } else {
-                        orrery_core::git_ops::staged_diff(&id).unwrap_or_default()
+                        orrery_core::git_ops::staged_diff(&id_for_diff).unwrap_or_default()
                     }
                 })
                 .await;
             let result = if diff.trim().is_empty() {
                 Err("Working tree clean — nothing to commit.".to_string())
             } else {
-                crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
+                crate::task::run(async move { orrery_core::ai::commit_message(&id, &diff).await })
                     .await
                     .map(|m| orrery_core::ai::split_commit_message(&m))
             };

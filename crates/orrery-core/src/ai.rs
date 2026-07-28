@@ -47,12 +47,23 @@ pub async fn installed_models() -> Vec<(String, u64)> {
     }
 }
 
+/// Default token budget for short generations (summaries, ping, resume, …).
+const DEFAULT_NUM_PREDICT: u32 = 120;
+/// Token budget for Conventional Commit messages (subject + real body).
+const COMMIT_NUM_PREDICT: u32 = 384;
+/// Max diff characters fed into the commit prompt (keeps context bounded).
+const COMMIT_DIFF_CLAMP: usize = 10_000;
+
 /// Generate text from `prompt` using `model` on the active backend. The
 /// llama.cpp backend serves the configured GGUF, so it ignores `model`.
 pub async fn generate(model: &str, prompt: &str) -> Result<String, String> {
+    generate_limited(model, prompt, DEFAULT_NUM_PREDICT).await
+}
+
+async fn generate_limited(model: &str, prompt: &str, num_predict: u32) -> Result<String, String> {
     match active_backend() {
-        Backend::Ollama => ollama_generate(model, prompt).await,
-        Backend::LlamaCpp => crate::llama::generate(prompt).await,
+        Backend::Ollama => ollama_generate(model, prompt, num_predict).await,
+        Backend::LlamaCpp => crate::llama::generate(prompt, num_predict).await,
     }
 }
 
@@ -202,18 +213,23 @@ fn likely_thinking_model(model: &str) -> bool {
 /// token budget on hidden reasoning. Other models try without the field first;
 /// if the response is empty, we retry once with `think:false` — that way plain
 /// models that might reject the field are never hit with it unnecessarily.
-async fn ollama_generate(model: &str, prompt: &str) -> Result<String, String> {
+async fn ollama_generate(model: &str, prompt: &str, num_predict: u32) -> Result<String, String> {
     if likely_thinking_model(model) {
-        return generate_once(model, prompt, true).await;
+        return generate_once(model, prompt, true, num_predict).await;
     }
-    let first = generate_once(model, prompt, false).await?;
+    let first = generate_once(model, prompt, false, num_predict).await?;
     if !first.is_empty() {
         return Ok(first);
     }
-    generate_once(model, prompt, true).await
+    generate_once(model, prompt, true, num_predict).await
 }
 
-async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Result<String, String> {
+async fn generate_once(
+    model: &str,
+    prompt: &str,
+    suppress_think: bool,
+    num_predict: u32,
+) -> Result<String, String> {
     #[derive(Deserialize)]
     struct GenResp {
         #[serde(default)]
@@ -223,7 +239,7 @@ async fn generate_once(model: &str, prompt: &str, suppress_think: bool) -> Resul
         "model": model,
         "prompt": prompt,
         "stream": false,
-        "options": { "temperature": 0.2, "num_predict": 120 }
+        "options": { "temperature": 0.2, "num_predict": num_predict }
     });
     if suppress_think {
         body["think"] = serde_json::Value::Bool(false);
@@ -353,15 +369,148 @@ fn clamp_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
-/// Prompt to write a Conventional Commit message from a staged diff. The
-/// output shape (subject, blank line, optional body) is parsed back apart by
-/// [`split_commit_message`].
+fn is_odoo_manifest_path(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    base == "__manifest__.py" || base == "__openerp__.py"
+}
+
+/// Relative paths of Odoo manifests touched by a unified diff (`diff --git` /
+/// `+++ b/` headers).
+pub fn manifest_paths_in_diff(diff: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            for part in rest.split_whitespace() {
+                let p = part
+                    .strip_prefix("a/")
+                    .or_else(|| part.strip_prefix("b/"))
+                    .unwrap_or(part);
+                if is_odoo_manifest_path(p) && !paths.iter().any(|x| x == p) {
+                    paths.push(p.to_string());
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ b/") {
+            let p = rest.split('\t').next().unwrap_or(rest).trim();
+            if is_odoo_manifest_path(p) && !paths.iter().any(|x| x == p) {
+                paths.push(p.to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// Parse an Odoo-style `version` assignment from a single line
+/// (`'version': '19.0.1.0.0'`, `"version": "…"`, optional leading diff `+/-`).
+pub fn parse_odoo_version_line(line: &str) -> Option<String> {
+    let raw = line.trim();
+    let stripped = raw
+        .strip_prefix('+')
+        .or_else(|| raw.strip_prefix('-'))
+        .unwrap_or(raw)
+        .trim()
+        .trim_end_matches(',')
+        .trim();
+
+    for key in ["'version'", "\"version\""] {
+        let Some(idx) = stripped.find(key) else {
+            continue;
+        };
+        let after_key = stripped[idx + key.len()..].trim_start();
+        let after_sep = after_key
+            .strip_prefix(':')
+            .or_else(|| after_key.strip_prefix('='))?
+            .trim_start();
+        let quote = after_sep.chars().next()?;
+        if quote != '\'' && quote != '"' {
+            continue;
+        }
+        let inner = &after_sep[quote.len_utf8()..];
+        let end = inner.find(quote)?;
+        let val = inner[..end].trim();
+        if !val.is_empty() && val.chars().any(|c| c.is_ascii_digit()) {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+fn version_from_added_diff_lines(diff: &str) -> Option<String> {
+    // Prefer the new (+) value when a version line changed.
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            if let Some(v) = parse_odoo_version_line(line) {
+                return Some(v);
+            }
+        }
+    }
+    // Fall back to any version line in the hunk (context / deletions).
+    for line in diff.lines() {
+        if let Some(v) = parse_odoo_version_line(line) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn version_from_manifest_file(path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().find_map(parse_odoo_version_line)
+}
+
+/// Resolve an Odoo module version for commit prompts: prefer on-disk
+/// `__manifest__.py` / `__openerp__.py` when `repo_path` is set (survives diff
+/// truncation), else parse from the diff hunk. Returns a short hint line or
+/// `None` when the change set does not touch a manifest.
+pub fn odoo_manifest_version_hint(diff: &str, repo_path: Option<&str>) -> Option<String> {
+    let paths = manifest_paths_in_diff(diff);
+    let touches_manifest =
+        !paths.is_empty() || diff.contains("__manifest__.py") || diff.contains("__openerp__.py");
+    if !touches_manifest {
+        return None;
+    }
+
+    let from_disk = repo_path.and_then(|root| {
+        let root = std::path::Path::new(root);
+        if !paths.is_empty() {
+            paths
+                .iter()
+                .find_map(|rel| version_from_manifest_file(&root.join(rel)))
+        } else {
+            // Headers missed but the text mentions a manifest — walk common
+            // single-module layouts is out of scope; stick to diff parse.
+            None
+        }
+    });
+    let version = from_disk.or_else(|| version_from_added_diff_lines(diff))?;
+    Some(format!(
+        "Odoo module version (from __manifest__.py): {version}"
+    ))
+}
+
+/// Prompt to write a Conventional Commit message from a staged/working diff.
+/// When `repo_path` is set and the diff touches an Odoo manifest, the current
+/// module version is injected so it survives the diff character clamp.
+/// Output shape (subject, blank line, body) is parsed by [`split_commit_message`].
 pub fn commit_prompt(diff: &str) -> String {
+    commit_prompt_with_context(diff, None)
+}
+
+/// Like [`commit_prompt`], with an optional repo root for on-disk manifest reads.
+pub fn commit_prompt_with_context(diff: &str, repo_path: Option<&str>) -> String {
+    let hint = odoo_manifest_version_hint(diff, repo_path)
+        .map(|h| format!("\n{h}\n"))
+        .unwrap_or_default();
     format!(
-        "Write a single Conventional Commit message (e.g. `feat(scope): summary`) for these staged \
-changes. Output ONLY the message — no code fences, no explanation. Subject under 72 chars on the \
-first line; if a short body genuinely helps, add it after one blank line.\n\nDiff:\n{}\n\nCommit message:",
-        clamp_chars(diff, 6000)
+        "Write a Conventional Commit message for these staged changes.\n\n\
+Requirements:\n\
+- Subject line in Conventional Commit form (e.g. `feat(scope): summary`), under ~72 characters.\n\
+- Then a blank line, then a real body of 2–5 short sentences or bullets explaining WHAT changed and WHY — not a subject-only one-liner.\n\
+- If the diff touches `__manifest__.py` or `__openerp__.py` and shows a `version` change, you MUST mention the module version in the subject or body.\n\
+- Output ONLY the commit message — no code fences, no preamble, no quotes around the whole message.\n\
+- Write in English.\n\
+{hint}\n\
+Diff:\n{}\n\nCommit message:",
+        clamp_chars(diff, COMMIT_DIFF_CLAMP)
     )
 }
 
@@ -446,15 +595,24 @@ Commits:\n{}\n\nWhat changed:",
 /// returns an error when AI is unreachable or no model is installed, so callers
 /// degrade gracefully (the `aiReady` contract).
 async fn generate_with_model(prompt: &str) -> Result<String, String> {
+    generate_with_budget(prompt, DEFAULT_NUM_PREDICT).await
+}
+
+async fn generate_with_budget(prompt: &str, num_predict: u32) -> Result<String, String> {
     let cfg = crate::config::load();
     let models = installed_models().await;
     let model = pick_model(&cfg.ai_model, &models).ok_or("no AI model installed")?;
-    generate(&model, prompt).await
+    generate_limited(&model, prompt, num_predict).await
 }
 
-/// Generate a Conventional Commit message for a staged diff.
-pub async fn commit_message(diff: &str) -> Result<String, String> {
-    generate_with_model(&commit_prompt(diff)).await
+/// Generate a Conventional Commit message for a staged/working diff.
+///
+/// `repo_path` is the repo root used to read `__manifest__.py` when the diff
+/// touches it (so the version survives the diff character clamp). Pass `""`
+/// or any path when unknown — version still falls back to parsing the diff.
+pub async fn commit_message(repo_path: &str, diff: &str) -> Result<String, String> {
+    let path = (!repo_path.is_empty()).then_some(repo_path);
+    generate_with_budget(&commit_prompt_with_context(diff, path), COMMIT_NUM_PREDICT).await
 }
 
 /// Summarize commit subjects into a markdown changelog.
@@ -622,9 +780,71 @@ mod tests {
     fn commit_prompt_includes_diff_and_clamps() {
         let p = commit_prompt("diff --git a/x b/x\n+hello");
         assert!(p.contains("Conventional Commit"));
+        assert!(p.contains("WHAT changed and WHY"));
         assert!(p.contains("+hello"));
-        // very long diffs are clamped
-        let big = "x".repeat(10_000);
-        assert!(commit_prompt(&big).len() < 8000);
+        // very long diffs are clamped (budget leaves room for the prompt wrapper)
+        let big = "x".repeat(20_000);
+        let clamped = commit_prompt(&big);
+        assert!(clamped.len() < COMMIT_DIFF_CLAMP + 2_000);
+        assert!(!clamped.contains(&"x".repeat(COMMIT_DIFF_CLAMP + 1)));
+    }
+
+    #[test]
+    fn parse_odoo_version_line_accepts_common_forms() {
+        assert_eq!(
+            parse_odoo_version_line("    'version': '19.0.1.2.0',"),
+            Some("19.0.1.2.0".into())
+        );
+        assert_eq!(
+            parse_odoo_version_line("+    \"version\": \"18.0.1.0.1\""),
+            Some("18.0.1.0.1".into())
+        );
+        assert_eq!(parse_odoo_version_line("name = 'foo'"), None);
+        assert_eq!(parse_odoo_version_line("--- a/__manifest__.py"), None);
+    }
+
+    #[test]
+    fn odoo_manifest_version_hint_from_diff_and_disk() {
+        let diff = "\
+diff --git a/addons/foo/__manifest__.py b/addons/foo/__manifest__.py
+--- a/addons/foo/__manifest__.py
++++ b/addons/foo/__manifest__.py
+@@ -1,5 +1,5 @@
+ {
+-    'version': '19.0.1.1.0',
++    'version': '19.0.1.2.0',
+     'name': 'Foo',
+ }
+";
+        let hint = odoo_manifest_version_hint(diff, None).expect("hint");
+        assert!(hint.contains("19.0.1.2.0"), "{hint}");
+        assert!(hint.contains("Odoo module version"));
+
+        // No manifest in the change set → no hint.
+        assert!(odoo_manifest_version_hint("diff --git a/x.rs b/x.rs\n+hi", None).is_none());
+
+        // On-disk read wins when repo_path points at a real manifest.
+        let dir = tempfile::tempdir().unwrap();
+        let mod_dir = dir.path().join("addons/foo");
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        std::fs::write(
+            mod_dir.join("__manifest__.py"),
+            "{\n    'version': '19.0.9.9.9',\n    'name': 'Foo',\n}\n",
+        )
+        .unwrap();
+        let hint = odoo_manifest_version_hint(diff, Some(dir.path().to_str().unwrap())).unwrap();
+        assert!(hint.contains("19.0.9.9.9"), "{hint}");
+
+        let prompt = commit_prompt_with_context(diff, None);
+        assert!(prompt.contains("19.0.1.2.0"));
+        assert!(prompt.contains("__manifest__.py"));
+    }
+
+    #[test]
+    fn manifest_paths_in_diff_collects_headers() {
+        let diff = "diff --git a/m/__manifest__.py b/m/__manifest__.py\n+++ b/m/__openerp__.py\n";
+        let paths = manifest_paths_in_diff(diff);
+        assert!(paths.iter().any(|p| p == "m/__manifest__.py"));
+        assert!(paths.iter().any(|p| p == "m/__openerp__.py"));
     }
 }

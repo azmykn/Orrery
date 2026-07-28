@@ -343,7 +343,10 @@ async fn ensure_running() -> Result<String, String> {
 }
 
 /// Generate text from `prompt` via the llama.cpp sidecar.
-pub async fn generate(prompt: &str) -> Result<String, String> {
+///
+/// `n_predict` caps how many tokens the completion may emit (commit messages
+/// use a higher budget than short summaries).
+pub async fn generate(prompt: &str, n_predict: u32) -> Result<String, String> {
     let base = ensure_running().await?;
     #[derive(Deserialize)]
     struct Resp {
@@ -352,7 +355,7 @@ pub async fn generate(prompt: &str) -> Result<String, String> {
     }
     let body = serde_json::json!({
         "prompt": prompt,
-        "n_predict": 120,
+        "n_predict": n_predict,
         "temperature": 0.2,
         "stream": false,
     });
