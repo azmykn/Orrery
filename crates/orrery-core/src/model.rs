@@ -193,6 +193,11 @@ pub struct AppConfig {
     /// Active workspace group name, if any (filters Mission Control).
     #[serde(default)]
     pub active_workspace_group: Option<String>,
+    /// Absolute path prefixes for upstream / vendor checkouts you Pull but
+    /// do not Push (e.g. Odoo `core/` + `custom/`). Repos under these paths
+    /// skip CI-failure attention and hide Push; Behind still prompts Pull.
+    #[serde(default)]
+    pub pull_only_prefixes: Vec<String>,
 }
 
 /// A named set of repos matched by absolute path prefixes (e.g. odoo19/core).

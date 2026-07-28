@@ -397,6 +397,39 @@ pub fn reset_hard_upstream(path: &str) -> Result<OpOutcome, String> {
     Ok(OpOutcome::Done(format!("reset --hard {up_name}")))
 }
 
+/// Discard all local uncommitted changes relative to HEAD: `git reset --hard
+/// HEAD` plus `git clean -fd` (untracked files and directories). Does **not**
+/// move the branch tip — commits stay; only the working tree and index are
+/// wiped. Skips when the tree is already clean. Distinct from
+/// [`reset_hard_upstream`], which resets to `@{upstream}`.
+pub fn discard_all_changes(path: &str) -> Result<OpOutcome, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    if status_of(&repo).dirty == 0 {
+        return Ok(OpOutcome::Skipped("clean".into()));
+    }
+    let head = repo.head().map_err(|e| e.to_string())?;
+    let Some(oid) = head.target() else {
+        return Ok(OpOutcome::Skipped("unborn branch".into()));
+    };
+    let object = repo.find_object(oid, None).map_err(|e| e.to_string())?;
+    repo.reset(
+        &object,
+        git2::ResetType::Hard,
+        Some(git2::build::CheckoutBuilder::new().force()),
+    )
+    .map_err(|e| e.to_string())?;
+    // Hard reset covers tracked/index changes; clean removes leftover untracked
+    // paths that still count toward `dirty` in `status_of`.
+    let cleaned = run_command(path, "git clean -fd")?;
+    if !cleaned.ok {
+        return Err(format!(
+            "reset --hard HEAD ok, but git clean -fd failed: {}",
+            cleaned.output_tail
+        ));
+    }
+    Ok(OpOutcome::Done("discarded uncommitted changes".into()))
+}
+
 /// Stash uncommitted changes (including untracked). A clean tree is a skip.
 pub fn stash(path: &str) -> Result<OpOutcome, String> {
     let mut repo = Repository::open(path).map_err(|e| e.to_string())?;
@@ -1359,6 +1392,43 @@ mod tests {
         assert!(matches!(stash(&path), Ok(OpOutcome::Done(_))));
         // Tree is clean again after stashing.
         assert_eq!(status_of(&Repository::open(&path).unwrap()).dirty, 0);
+    }
+
+    #[test]
+    fn discard_all_changes_skips_clean_and_wipes_dirty() {
+        let (_dir, path) = init_repo();
+        assert!(matches!(
+            discard_all_changes(&path),
+            Ok(OpOutcome::Skipped(_))
+        ));
+
+        let root = std::path::Path::new(&path);
+        // Tracked edit + staged new file + untracked file.
+        fs::write(root.join("README.md"), "# changed").unwrap();
+        fs::write(root.join("staged.txt"), "staged").unwrap();
+        {
+            let repo = Repository::open(&path).unwrap();
+            let mut index = repo.index().unwrap();
+            index
+                .add_path(std::path::Path::new("staged.txt"))
+                .unwrap();
+            index.write().unwrap();
+        }
+        fs::write(root.join("untracked.txt"), "gone").unwrap();
+        fs::create_dir_all(root.join("untracked_dir")).unwrap();
+        fs::write(root.join("untracked_dir/nested.txt"), "gone").unwrap();
+        assert!(status_of(&Repository::open(&path).unwrap()).dirty > 0);
+
+        assert!(matches!(
+            discard_all_changes(&path),
+            Ok(OpOutcome::Done(_))
+        ));
+        let after = status_of(&Repository::open(&path).unwrap());
+        assert_eq!(after.dirty, 0);
+        assert_eq!(fs::read_to_string(root.join("README.md")).unwrap(), "# Test");
+        assert!(!root.join("staged.txt").exists());
+        assert!(!root.join("untracked.txt").exists());
+        assert!(!root.join("untracked_dir").exists());
     }
 
     #[test]

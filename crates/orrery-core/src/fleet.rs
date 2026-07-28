@@ -235,6 +235,17 @@ pub fn reset_hard_op() -> impl Fn(&str) -> Outcome + Sync {
     }
 }
 
+/// Discard working-tree + index changes relative to HEAD (`reset --hard HEAD`
+/// + `clean -fd`). Keeps commits; skips clean trees. Distinct from
+/// [`reset_hard_op`] (upstream).
+pub fn discard_changes_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| match git_ops::discard_all_changes(path) {
+        Ok(OpOutcome::Done(s)) => Outcome::Ok(s),
+        Ok(OpOutcome::Skipped(r)) => Outcome::Skipped(r),
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
 /// Fleet prune, delegating to `git_ops::prune_branches` (merged /
 /// upstream-gone local branches only — never HEAD, main, or master; see
 /// `git_ops::prunable`). Repos with nothing prunable are skips, so the report
