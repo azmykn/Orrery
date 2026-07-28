@@ -811,7 +811,10 @@ mod tests {
         )
         .unwrap();
         let paths = submodule_paths(root);
-        assert_eq!(paths, vec!["vendor/tools".to_string(), "vendor/hr".to_string()]);
+        assert_eq!(
+            paths,
+            vec!["vendor/tools".to_string(), "vendor/hr".to_string()]
+        );
     }
 
     #[test]

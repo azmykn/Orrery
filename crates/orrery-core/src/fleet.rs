@@ -179,6 +179,41 @@ pub fn pull_op() -> impl Fn(&str) -> Outcome + Sync {
     }
 }
 
+/// Stage every unstaged path in the repo (`git add`-all pending changes).
+pub fn stage_all_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| match git_ops::stage_all(path) {
+        Ok(0) => Outcome::Skipped("nothing to stage".into()),
+        Ok(n) => Outcome::Ok(format!("staged {n}")),
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
+/// Stage-all then commit with the same `message` on every repo (manual bulk
+/// Commit All). Clean trees skip; other git refusals fail.
+pub fn commit_all_op(message: String) -> impl Fn(&str) -> Outcome + Sync {
+    move |path| {
+        let msg = message.trim();
+        if msg.is_empty() {
+            return Outcome::Failed("empty commit message".into());
+        }
+        match git_ops::commit_all(path, msg) {
+            Ok(hash) => Outcome::Ok(format!("committed {hash}")),
+            Err(e) if e == "no staged changes to commit" => {
+                Outcome::Skipped("nothing to commit".into())
+            }
+            Err(e) => Outcome::Failed(e),
+        }
+    }
+}
+
+/// Push the current branch to its upstream (or set upstream on origin).
+pub fn push_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| match git_ops::push(path) {
+        Ok(s) => Outcome::Ok(s),
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
 /// Fleet hard reset to `@{upstream}` (`git reset --hard origin/<branch>`).
 /// Destructive: discards local commits and dirty work. Skips (not fails) when
 /// there is no upstream / detached HEAD.
@@ -460,6 +495,26 @@ mod tests {
                 report.failed_count()
             ),
             (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn commit_all_op_commits_dirty_and_skips_clean() {
+        let (_d, path) = init_repo();
+        std::fs::write(std::path::Path::new(&path).join("extra.txt"), "x").unwrap();
+        let op = commit_all_op("fleet: commit dirty".into());
+        match op(&path) {
+            Outcome::Ok(s) => assert!(s.starts_with("committed "), "{s}"),
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        // Clean again → skip.
+        assert_eq!(
+            commit_all_op("noop".into())(&path),
+            Outcome::Skipped("nothing to commit".into())
+        );
+        assert_eq!(
+            commit_all_op("   ".into())(&path),
+            Outcome::Failed("empty commit message".into())
         );
     }
 

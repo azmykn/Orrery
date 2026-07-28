@@ -8,7 +8,7 @@
 
 A Linux-native command center that puts every repo in your dev directories into orbit — live git status at a glance, one-click launch into your IDE or a terminal coding agent, enriched with multi-host data and local-AI summaries.
 
-📖 **[Documentation & feature tour →](https://hankanman.github.io/Orrery/)**
+📖 **[Documentation & feature tour →](https://hankanman.github.io/Orrery/)** · 📋 **[Changelog](CHANGELOG.md)**
 
 <img src="docs/public/shots/mission-control.png" alt="Orrery — Mission Control" width="860">
 
@@ -17,6 +17,33 @@ A Linux-native command center that puts every repo in your dev directories into 
 ---
 
 > **Status:** 🚧 Early development, but functional. Now a **native Rust app on GPUI** (no webview) — the earlier Tauri 2 + React build was rewritten for GPU rendering. Mission Control, multi-host enrichment, launchers, Inbox/Feed/Explore/Cleanup/Agents/Dev Tools, and local AI all work. Tagged releases produce `.deb`/`.rpm`/`.AppImage`; you can also [build from source](https://hankanman.github.io/Orrery/guide/getting-started). Expect rough edges; track progress in [the issues](../../issues).
+
+## What’s new (DigitsCode fork)
+
+This fork targets large Odoo / DigitsCode workspaces (hundreds of repos, nested
+submodules). Highlights:
+
+| | |
+|---|---|
+| **Submodule TREE** | Sidebar tree of parents → checked-out submodules; grid hides children by default |
+| **Stageable / Commitable / Pushable** | Action chips + right-click on cards **and list** rows (Generate & commit when AI is ready) |
+| **Smart +** | One dark **+** chip → tabbed modal: Add local path / Clone from GitHub / New repository |
+| **Top tabs** | Primary nav as horizontal tabs; sidebar stays GROUPS / TREE / ROOTS / … |
+| **Readable chrome** | Window min/max/close and header **+** load gpui-component icons with clearer contrast |
+
+Full notes: **[CHANGELOG.md](CHANGELOG.md)**.
+
+<p align="center">
+  <img src="docs/public/shots/header-add-and-window-controls.png" alt="Header: + chip and window controls (add entry is now a tabbed modal)" width="420">
+  &nbsp;
+  <img src="docs/public/shots/changes-commit.png" alt="Changes drawer — commit / generate" width="420">
+</p>
+
+<p align="center">
+  <img src="docs/public/shots/explore-odoo.png" alt="Explore view in an Odoo workspace" width="420">
+  &nbsp;
+  <img src="docs/public/shots/attention-list.png" alt="Attention list filter" width="420">
+</p>
 
 ## What is it?
 
@@ -30,15 +57,17 @@ Point Orrery at the directories where you keep your projects. It discovers every
 
 ## Features
 
-- **Mission Control** — a virtualized grid that scales to hundreds of repos, with filters for visibility (public/private/all), dirty/ahead/starred/stale, workspace root, and language, plus an activity graph and a <kbd>⌘K</kbd> command palette.
+- **Mission Control** — a virtualized grid that scales to hundreds of repos, with filters for visibility (public/private/all), dirty / stageable / commitable / pushable / ahead / behind / starred / stale, workspace root, language, and name search, plus an activity graph and a <kbd>⌘K</kbd> command palette.
+- **Submodule TREE** — parents expand to checked-out submodule children; focusing a parent scopes the grid to that family (children stay out of the flat grid otherwise).
+- **Context menus & fleet** — right-click on grid cards or list rows for Stage all, Commit All / Generate & commit (`aiReady`), Push, Fetch, Pull; multi-select fleet Stage all / Push.
 - **One-click launchers** — open in your IDE or drop a terminal agent into any repo. Pick your tools from preset chips with real brand logos (VS Code, Cursor, Zed, the JetBrains family, …; Kitty/Alacritty/Ghostty/… × Claude Code/Aider/Codex/…). The card buttons show whatever you configured.
-- **Repo drawer** — branches, recent commits, a staged-diff view with AI-generated commit messages and changelogs, and the README.
+- **Repo drawer** — branches, recent commits, Changes with **Commit All** / AI generate from the working tree, staged hunks, and the README.
 - **Inbox / Feed / Explore** — what needs you (PRs, reviews, issues, notifications), a release/social activity feed, and a browser for your starred repos with one-click clone.
 - **Local AI** — repo summaries, commit messages, a daily briefing, and semantic search, all on-device via [Ollama](https://ollama.com). Turn it off and every AI affordance disappears.
 - **Native desktop integration** — borrows the system theme, accent colour, and window decorations so it feels at home on KDE/GNOME.
 - **Offline-first** — a local SQLite cache paints the grid instantly on launch and keeps working without a connection; visibility and host enrichment survive restarts.
 
-See the [feature tour](https://hankanman.github.io/Orrery/guide/mission-control) for screenshots of each surface.
+See the [feature tour](https://hankanman.github.io/Orrery/guide/mission-control) for more screenshots of each surface.
 
 ## Why?
 
@@ -49,7 +78,7 @@ There's no great *workspace dashboard* for Linux. GitKraken is heavy and git-foc
 | Layer | Choice |
 |---|---|
 | UI | Native Rust on [GPUI](https://www.gpui.rs) (Zed's GPU UI framework) — no webview |
-| Rendering | GPU via `blade` (Vulkan), Wayland/X11 direct; [gpui-component](https://github.com/longbridge/gpui-component) widgets |
+| Rendering | GPU via `blade` (Vulkan), Wayland/X11 direct; [gpui-component](https://github.com/longbridge/gpui-component) widgets + [gpui-component-assets](https://github.com/longbridge/gpui-component) icons |
 | Git | `git2` (libgit2, vendored) |
 | Persistence | SQLite (`rusqlite`, bundled) + TOML config (XDG dirs) |
 | Hosts | GitHub + GitLab REST/GraphQL via `reqwest` (rustls), incl. self-hosted |
@@ -93,6 +122,9 @@ pnpm docs:build       # build the static site
 
 → **https://hankanman.github.io/Orrery/**
 
+Fork release notes and DigitsCode-oriented updates live in **[CHANGELOG.md](CHANGELOG.md)**.
+Screenshots used in the README/changelog are under [`docs/public/shots/`](docs/public/shots/).
+
 ## Rendering
 
 The UI is rendered on the GPU through GPUI's `blade` (Vulkan) backend and talks
@@ -115,7 +147,15 @@ The four original phases are substantially in place:
 - ✅ **Local AI** — on-device summaries, commit messages, daily briefing, semantic search via Ollama.
 - ✅ **Starred / followed browser** — Explore (starred + clone) and Feed (releases/activity).
 
-Next up and ongoing work lives in [the issue list](../../issues).
+DigitsCode fork (in tree / recent):
+
+- ✅ Submodule scan + TREE sidebar + hide-children grid.
+- ✅ Stageable / Commitable / Pushable filters + context menus (grid + list) + fleet Stage/Push.
+- ✅ Smart **+** tabbed modal (path / clone / new repo); Commit All from working tree.
+- ✅ Top tabs chrome; visible TitleBar / header action icons.
+
+Next up and ongoing work lives in [the issue list](../../issues). Out of scope for
+the current fork pass: automatic `git submodule update --init`.
 
 ## License
 

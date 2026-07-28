@@ -247,16 +247,16 @@ pub(crate) fn unwrap_soft_breaks(src: &str) -> String {
 }
 
 pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
-    let mut child_counts: HashMap<&str, u32> = HashMap::new();
+    let mut child_counts: HashMap<String, u32> = HashMap::new();
     for r in &repos {
         if let Some(p) = r.parent_id.as_deref() {
-            *child_counts.entry(p).or_default() += 1;
+            *child_counts.entry(p.to_string()).or_default() += 1;
         }
     }
     repos
         .into_iter()
         .map(|r| {
-            let child_count = child_counts.get(r.id.as_str()).copied().unwrap_or(0);
+            let child_count = child_counts.get(&r.id).copied().unwrap_or(0);
             Row {
                 id: r.id.into(),
                 url: match (r.remote_host.as_deref(), r.slug.as_deref()) {

@@ -6,6 +6,9 @@ shell, views) plus the thin async/foreground plumbing. Desktop integration
 (tray, notifications, appearance, watcher) lives in
 [`orrery-platform`](../orrery-platform).
 
+See the workspace **[README](../../README.md)** and **[CHANGELOG](../../CHANGELOG.md)**
+for DigitsCode fork features (TREE, filters, context menus, top tabs, chrome).
+
 ## Run
 
 ```bash
@@ -19,21 +22,23 @@ scripts/setup.sh` installs them. Requires the toolchain pinned in
 `rust-toolchain.toml` (rustup auto-selects it).
 
 The grid paints from the SQLite cache (`~/.local/share/orrery/cache.sqlite`) and
-then refreshes live; on first run, open **Settings → Workspace roots** and point
-it at your project directories.
+then refreshes live; on first run, use header **+ → Add local path…** (or
+**Settings → Workspace roots**) and point it at your project directories.
 
 ## Layout
 
 ```
 src/
   main.rs              app/window setup, key bindings, close-to-tray
-  shell.rs             header + sidebar nav + view switching + OrreryApp state
-  card.rs              the RepoCard
+  shell.rs             header + top tabs + context sidebar + OrreryApp state
+  card.rs              the RepoCard (+ context menu)
   drawer.rs            repo detail drawer (Overview/Changes/PR/Notes/Readme)
+  fleet.rs             multi-select fleet ops (Fetch/Pull/StageAll/Push/…)
   palette.rs           command palette (Ctrl+K): actions + repos + code/semantic search
   views/               inbox feed explore cleanup agents devtools settings newproject
   theme.rs             the design system as --orr-* tokens → gpui colors
-  data.rs              orrery_core::model → flat render-ready Row
+  data.rs              orrery_core::model → flat render-ready Row (parent_id, child_count)
+  assets.rs            lucide/brand/devicon + gpui-component-assets fallback
   task.rs live.rs      async (tokio) bridge + background→foreground signal wiring
   assets/              embedded fonts + generated icon SVGs (rust-embed)
 ```

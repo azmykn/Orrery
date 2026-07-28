@@ -53,6 +53,7 @@ pub fn render(
     let dest_root = roots.get(d.root).cloned().unwrap_or_default();
 
     let mut panel = div()
+        .id("np-panel")
         .occlude()
         .w(px(520.))
         .flex()
@@ -63,6 +64,8 @@ pub fn render(
         .bg(rgb(t.surface))
         .border_1()
         .border_color(rgb(t.border))
+        // Swallow clicks so the backdrop doesn't close the dialog.
+        .on_click(|_ev, _win, _cx| {})
         .child(
             div()
                 .font_weight(FontWeight::SEMIBOLD)
@@ -70,28 +73,37 @@ pub fn render(
                 .text_color(rgb(t.fg0))
                 .child("Add"),
         )
-        // Mode tabs: local path | GitHub clone | blank repo.
+        // One tab per task — local path | clone | blank repo.
         .child(
             div()
                 .flex()
                 .flex_row()
-                .flex_wrap()
-                .gap(px(8.))
-                .child(mode_tab("Local path", NewMode::AddRoot, d.mode, t, app))
-                .child(mode_tab("From GitHub", NewMode::Clone, d.mode, t, app))
+                .w_full()
+                .p(px(3.))
+                .gap(px(2.))
+                .rounded(px(t.r_sm))
+                .bg(rgb(t.button_bg))
+                .border_1()
+                .border_color(rgb(t.border))
+                .child(mode_tab("Add local path", NewMode::AddRoot, d.mode, t, app))
+                .child(mode_tab(
+                    "Clone from GitHub",
+                    NewMode::Clone,
+                    d.mode,
+                    t,
+                    app,
+                ))
                 .child(mode_tab("New repository", NewMode::Create, d.mode, t, app)),
         );
 
     match d.mode {
         NewMode::AddRoot => {
-            panel = panel
-                .child(field("Local path", &d.root_path, t))
-                .child(
-                    div()
-                        .text_size(px(t.text_data_sm))
-                        .text_color(rgb(t.fg3))
-                        .child("A single git repo or a folder of repos."),
-                );
+            panel = panel.child(field("Local path", &d.root_path, t)).child(
+                div()
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg3))
+                    .child("A single git repo or a folder of repos."),
+            );
         }
         NewMode::Clone => {
             panel = panel.child(field("Repository URL", &d.url, t));
@@ -194,21 +206,37 @@ fn mode_tab(
 ) -> impl IntoElement {
     let app = app.clone();
     let on = mode == active;
-    div()
+    let mut tab = div()
         .id(SharedString::from(format!("npmode-{label}")))
-        .px(px(12.))
-        .py(px(6.))
-        .rounded(px(t.r_sm))
-        .bg(rgb(if on { t.accent_wash } else { t.button_bg }))
-        .border_1()
-        .border_color(rgb(if on { t.primary } else { t.border }))
+        .flex_1()
+        .px(px(10.))
+        .py(px(7.))
+        .rounded(px(t.r_xs))
         .text_size(px(t.text_data_sm))
+        .font_weight(if on {
+            FontWeight::MEDIUM
+        } else {
+            FontWeight::NORMAL
+        })
         .text_color(rgb(if on { t.fg0 } else { t.fg2 }))
         .cursor_pointer()
-        .child(SharedString::from(label.to_string()))
-        .on_click(move |_ev, _win, cx| {
-            app.update(cx, |this, cx| this.new_project_set_mode(mode, cx));
-        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(SharedString::from(label.to_string()));
+    if on {
+        tab = tab
+            .bg(rgb(t.surface))
+            .border_1()
+            .border_color(rgb(t.border));
+    } else {
+        let hov = t.surface_hover;
+        let fg = t.fg1;
+        tab = tab.hover(move |s| s.bg(rgb(hov)).text_color(rgb(fg)));
+    }
+    tab.on_click(move |_ev, _win, cx| {
+        app.update(cx, |this, cx| this.new_project_set_mode(mode, cx));
+    })
 }
 
 /// A checkbox-style row toggling whether `init` makes an initial commit.

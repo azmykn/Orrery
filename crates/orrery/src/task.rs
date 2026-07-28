@@ -52,3 +52,19 @@ where
 {
     runtime().spawn(fut);
 }
+
+/// Block the calling (non-tokio) thread until `fut` finishes on the shared
+/// runtime. Used by fleet worker threads that need AI (`commit_message`) —
+/// never call from a tokio worker (would deadlock).
+pub fn block_on<F, T>(fut: F) -> T
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    runtime().spawn(async move {
+        let _ = tx.send(fut.await);
+    });
+    rx.recv()
+        .expect("tokio task dropped before sending its result")
+}

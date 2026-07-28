@@ -4652,6 +4652,7 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui-component",
+ "gpui-component-assets",
  "gpui_platform",
  "image",
  "orrery-core",

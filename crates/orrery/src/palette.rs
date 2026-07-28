@@ -73,7 +73,7 @@ pub fn code_hit(h: orrery_core::search::SearchHit) -> CodeHit {
 
 /// A standing command (not tied to a single repo). The fleet verbs (#184)
 /// drive the same run/selection plumbing as the fleet bar (`fleet.rs`).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PaletteAction {
     Rescan,
     Settings,
@@ -100,8 +100,8 @@ impl PaletteAction {
             PaletteAction::PullBehind => "Pull all repositories behind upstream",
             PaletteAction::FetchSelected => "Fetch selected repositories",
             PaletteAction::PullSelected => "Pull selected repositories",
-            PaletteAction::SelectDirty => "Select dirty repositories",
-            PaletteAction::SelectBehind => "Select repositories behind upstream",
+            PaletteAction::SelectDirty => "Select dirty repos",
+            PaletteAction::SelectBehind => "Select repos behind upstream",
         }
     }
 
@@ -132,21 +132,105 @@ pub enum PaletteItem {
     Code(usize),
 }
 
-/// The standing commands offered for the current app state. The
-/// selection-scoped fleet verbs only list while a selection exists — with
-/// none they'd be dead rows.
-fn actions(has_selection: bool) -> Vec<PaletteAction> {
-    let mut out = vec![
-        PaletteAction::Rescan,
-        PaletteAction::Settings,
-        PaletteAction::FetchAll,
-        PaletteAction::PullBehind,
-        PaletteAction::SelectDirty,
-        PaletteAction::SelectBehind,
-    ];
+/// The standing commands offered for the current app state.
+///
+/// Empty-query view stays lean (jump + select helpers). Fleet-wide Fetch/Pull
+/// that already live on the Mission Control toolbar only appear when the query
+/// mentions them — otherwise the palette dumps a wall of redundant verbs.
+fn actions(has_selection: bool, query: &str) -> Vec<PaletteAction> {
+    let q = query.trim().to_lowercase();
+    let empty = q.is_empty();
+    let mut out = Vec::new();
+
+    let want = |keys: &[&str]| empty || keys.iter().any(|k| q.contains(k));
+
+    // Always-useful / not duplicated on the grid toolbar.
+    if want(&["rescan", "scan", "refresh"]) {
+        out.push(PaletteAction::Rescan);
+    }
+    if want(&["setting", "config", "prefs"]) {
+        out.push(PaletteAction::Settings);
+    }
+    if want(&["dirty", "select", "uncommitted", "stage"]) {
+        out.push(PaletteAction::SelectDirty);
+    }
+    if want(&["behind", "select", "upstream"]) {
+        out.push(PaletteAction::SelectBehind);
+    }
+
+    // Toolbar duplicates — only when searched for (or when a selection exists
+    // for the selection-scoped variants).
+    if !empty && want(&["fetch", "all"]) {
+        out.push(PaletteAction::FetchAll);
+    }
+    if !empty && want(&["pull", "behind", "all"]) {
+        out.push(PaletteAction::PullBehind);
+    }
     if has_selection {
-        out.push(PaletteAction::FetchSelected);
-        out.push(PaletteAction::PullSelected);
+        if empty
+            || q.contains("selected")
+            || q.contains("selection")
+            || PaletteAction::FetchSelected
+                .label()
+                .to_lowercase()
+                .contains(&q)
+        {
+            out.push(PaletteAction::FetchSelected);
+        }
+        if empty
+            || q.contains("selected")
+            || q.contains("selection")
+            || PaletteAction::PullSelected
+                .label()
+                .to_lowercase()
+                .contains(&q)
+        {
+            out.push(PaletteAction::PullSelected);
+        }
+    }
+
+    // Empty open: show the lean defaults even if the keyword filters above
+    // were too narrow (Rescan / Settings / Select*).
+    if empty {
+        out = vec![
+            PaletteAction::Rescan,
+            PaletteAction::Settings,
+            PaletteAction::SelectDirty,
+            PaletteAction::SelectBehind,
+        ];
+        if has_selection {
+            out.push(PaletteAction::FetchSelected);
+            out.push(PaletteAction::PullSelected);
+        }
+    } else {
+        // Dedup while preserving order (keyword branches can overlap).
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|a| seen.insert(*a));
+        // Also include any action whose full label contains the query.
+        for a in [
+            PaletteAction::Rescan,
+            PaletteAction::Settings,
+            PaletteAction::FetchAll,
+            PaletteAction::PullBehind,
+            PaletteAction::SelectDirty,
+            PaletteAction::SelectBehind,
+            PaletteAction::FetchSelected,
+            PaletteAction::PullSelected,
+        ] {
+            if (!has_selection
+                && matches!(
+                    a,
+                    PaletteAction::FetchSelected | PaletteAction::PullSelected
+                ))
+                || seen.contains(&a)
+            {
+                continue;
+            }
+            if a.label().to_lowercase().contains(&q) {
+                out.push(a);
+                seen.insert(a);
+            }
+        }
     }
     out
 }
@@ -173,13 +257,13 @@ pub fn name_rank(name: &str, slug: &str, path: &str, q: &str) -> Option<u8> {
     }
 }
 
-/// Build the filtered result list for `query`: actions (selection-scoped
-/// fleet verbs only when `has_selection`), name-matching repos (exact/prefix
-/// first, then substring), semantic recall hits the name pass missed
-/// (deduped, similarity-ranked, with snippets), then code-search hits.
+/// Build the filtered result list for `query`.
+///
+/// - **Empty query:** lean command list only (no 400-repo dump — type to jump).
+/// - **With query:** matching repos first, then commands, semantic, code hits.
+///
 /// Must be deterministic — the executor rebuilds it to resolve the selected
-/// index. With AI off `semantic` is always empty and this reduces to the
-/// name-only palette.
+/// index. With AI off `semantic` is always empty.
 pub fn items(
     rows: &[Row],
     code: &[CodeHit],
@@ -192,23 +276,18 @@ pub fn items(
     let mut out = Vec::new();
     let mut shown: HashSet<usize> = HashSet::new();
 
-    for a in actions(has_selection) {
-        if q.is_empty() || a.label().to_lowercase().contains(&q) {
+    if q.is_empty() {
+        for a in actions(has_selection, "") {
             out.push(PaletteItem::Action(a));
         }
+        return out;
     }
 
-    // Name matches, exact/prefix before substring; the sort is stable so grid
-    // order is preserved within each rank.
+    // Repos first — jumping to a repo is the primary job of the palette.
     let mut matched: Vec<(u8, usize)> = rows
         .iter()
         .enumerate()
-        .filter_map(|(i, r)| {
-            if q.is_empty() {
-                return Some((2, i));
-            }
-            name_rank(&r.name, &r.slug, &r.path, &q).map(|rank| (rank, i))
-        })
+        .filter_map(|(i, r)| name_rank(&r.name, &r.slug, &r.path, &q).map(|rank| (rank, i)))
         .collect();
     matched.sort_by_key(|(rank, _)| *rank);
     for (_, i) in matched.into_iter().take(MAX_REPOS) {
@@ -217,14 +296,15 @@ pub fn items(
         }
     }
 
-    // Semantic recall the name pass didn't surface, best match first.
-    if !q.is_empty() {
-        for (hit, h) in semantic.iter().enumerate() {
-            if let Some(row) = rows.iter().position(|r| r.id == h.id)
-                && shown.insert(row)
-            {
-                out.push(PaletteItem::Recall { row, hit });
-            }
+    for a in actions(has_selection, &q) {
+        out.push(PaletteItem::Action(a));
+    }
+
+    for (hit, h) in semantic.iter().enumerate() {
+        if let Some(row) = rows.iter().position(|r| r.id == h.id)
+            && shown.insert(row)
+        {
+            out.push(PaletteItem::Recall { row, hit });
         }
     }
 
@@ -239,32 +319,59 @@ pub fn render(
     data: &PaletteData,
     items: &[PaletteItem],
     rows: &[Row],
+    query: &str,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
     let selected = data.selected.min(items.len().saturating_sub(1));
+    let query_empty = query.trim().is_empty();
 
     let mut list = div().flex().flex_col().gap(px(1.)).p(px(6.));
     if items.is_empty() {
         list = list.child(
             div()
-                .p(px(12.))
+                .p(px(14.))
                 .text_size(px(t.text_small))
                 .text_color(rgb(t.fg3))
-                .child("No matches."),
+                .child("No matches — try another name or command."),
         );
-    }
-    for (i, item) in items.iter().enumerate() {
-        list = list.child(row_view(
-            item,
-            i,
-            i == selected,
-            rows,
-            &data.code,
-            &data.semantic,
-            t,
-            app,
-        ));
+    } else {
+        let mut last_section: Option<&'static str> = None;
+        for (i, item) in items.iter().enumerate() {
+            let section = match item {
+                PaletteItem::Action(_) => "Commands",
+                PaletteItem::Repo(_) => "Repositories",
+                PaletteItem::Recall { .. } => "By meaning",
+                PaletteItem::Code(_) => "In code",
+            };
+            if last_section != Some(section) {
+                list = list.child(palette_section(section, t));
+                last_section = Some(section);
+            }
+            list = list.child(row_view(
+                item,
+                i,
+                i == selected,
+                rows,
+                &data.code,
+                &data.semantic,
+                t,
+                app,
+            ));
+        }
+        if query_empty {
+            list = list.child(
+                div()
+                    .mt(px(6.))
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(t.r_sm))
+                    .bg(rgb(t.button_bg))
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg3))
+                    .child("Type a repo name to jump · filter the grid with the Mission Control search"),
+            );
+        }
     }
 
     let panel = div()
@@ -272,20 +379,24 @@ pub fn render(
         .flex()
         .flex_col()
         .w(px(PANEL_W))
-        .max_h(px(520.))
+        .max_h(px(480.))
         .rounded(px(t.r_md))
         .bg(rgb(t.page))
         .border_1()
         .border_color(rgb(t.border_strong))
-        // Query field.
         .child(
             div()
-                .p(px(8.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(10.))
                 .border_b_1()
                 .border_color(rgb(t.border))
-                .child(Input::new(&data.query).appearance(false)),
+                .child(lucide("search", 15., t.fg2))
+                .child(div().flex_1().child(Input::new(&data.query).appearance(false))),
         )
-        // Results.
         .child(
             div()
                 .id("palette-list")
@@ -297,7 +408,6 @@ pub fn render(
                 .child(list),
         );
 
-    // Backdrop + top-centered panel.
     div()
         .absolute()
         .top(px(0.))
@@ -308,8 +418,19 @@ pub fn render(
         .flex_col()
         .items_center()
         .bg(rgba(0x00000066))
-        .child(div().h(px(80.)))
+        .child(div().h(px(72.)))
         .child(panel)
+}
+
+fn palette_section(label: &'static str, t: &Theme) -> impl IntoElement {
+    div()
+        .px(px(10.))
+        .pt(px(8.))
+        .pb(px(3.))
+        .font_family("monospace")
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg3))
+        .child(SharedString::from(label.to_uppercase()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -432,12 +553,17 @@ mod tests {
             ahead: 0,
             behind: 0,
             dirty: 0,
+            staged: 0,
+            unstaged: 0,
             stars: "".into(),
             host: "".into(),
             private: false,
             favorite: false,
             activity: orrery_core::model::Activity::Active,
             last_commit_unix: 0,
+            parent_id: None,
+            submodule_path: None,
+            child_count: 0,
         }
     }
 
@@ -511,16 +637,16 @@ mod tests {
 
     #[test]
     fn items_without_semantic_matches_todays_palette() {
-        // AI off → `semantic` is empty; empty query lists everything in grid
-        // order, and a query filters by substring.
+        // AI off → `semantic` is empty. Empty query is commands-only (no repo
+        // dump); a query filters repos by name and matching commands.
         let rows = vec![row("/a", "alpha", "o/alpha"), row("/b", "beta", "o/beta")];
         let out = items(&rows, &[], &[], "", false);
-        assert_eq!(repo_order(&out), vec![0, 1]);
+        assert!(repo_order(&out).is_empty());
         assert_eq!(
             out.iter()
                 .filter(|i| matches!(i, PaletteItem::Action(_)))
                 .count(),
-            actions(false).len()
+            actions(false, "").len()
         );
         let out = items(&rows, &[], &[], "bet", false);
         assert_eq!(repo_order(&out), vec![1]);
@@ -530,23 +656,24 @@ mod tests {
     #[test]
     fn selection_scoped_fleet_verbs_gate_on_a_selection() {
         let rows = vec![row("/a", "alpha", "o/alpha")];
-        let listed = |has_selection: bool, action: PaletteAction| {
-            items(&rows, &[], &[], "", has_selection)
+        let listed = |query: &str, has_selection: bool, action: PaletteAction| {
+            items(&rows, &[], &[], query, has_selection)
                 .iter()
                 .any(|i| matches!(i, PaletteItem::Action(a) if *a == action))
         };
-        // No selection → the fleet-wide verbs list, the selection-scoped don't.
-        assert!(listed(false, PaletteAction::FetchAll));
-        assert!(listed(false, PaletteAction::PullBehind));
-        assert!(listed(false, PaletteAction::SelectDirty));
-        assert!(listed(false, PaletteAction::SelectBehind));
-        assert!(!listed(false, PaletteAction::FetchSelected));
-        assert!(!listed(false, PaletteAction::PullSelected));
-        // With a selection, the selection-scoped verbs appear too.
-        assert!(listed(true, PaletteAction::FetchSelected));
-        assert!(listed(true, PaletteAction::PullSelected));
+        // Empty open: lean defaults — no toolbar-duplicate Fetch/Pull all.
+        assert!(!listed("", false, PaletteAction::FetchAll));
+        assert!(!listed("", false, PaletteAction::PullBehind));
+        assert!(listed("", false, PaletteAction::SelectDirty));
+        assert!(listed("", false, PaletteAction::SelectBehind));
+        assert!(!listed("", false, PaletteAction::FetchSelected));
+        assert!(!listed("", false, PaletteAction::PullSelected));
+        // With a selection, selection-scoped verbs appear on the empty open.
+        assert!(listed("", true, PaletteAction::FetchSelected));
+        assert!(listed("", true, PaletteAction::PullSelected));
 
-        // And the query filters them like any action.
+        // Typing surfaces the toolbar-duplicate fleet verbs.
+        assert!(listed("fetch", false, PaletteAction::FetchAll));
         let out = items(&rows, &[], &[], "pull all", true);
         assert!(
             out.iter()

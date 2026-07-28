@@ -2,9 +2,10 @@
 //! bar running bulk Fetch/Pull/Prune (and bulk "Open in IDE") through
 //! `orrery_core::fleet`.
 //!
-//! Selection lives on [`OrreryApp::selected`] as repo ids, so it survives
-//! filter changes (and rescans — pruned to repos that still exist). One run at
-//! a time: [`OrreryApp::fleet_run`] carries the engine's cancel flag + live
+//! Selection lives on [`OrreryApp::selected`] as repo ids. Changing Mission
+//! Control filters (chip / root / language / group / TREE focus / saved view)
+//! clears the selection so bulk ops can't accidentally target the wrong set.
+//! Rescans prune ids for repos that vanished. One run at a time: [`OrreryApp::fleet_run`] carries the engine's cancel flag + live
 //! counter and gates the bar's buttons while active. The engine fires progress
 //! events on its worker threads; they're bridged over an `async-channel`
 //! drained by one foreground task (the `live.rs` pattern) that keeps a keyed
@@ -30,7 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
-    Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AppContext, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 
@@ -58,6 +59,13 @@ pub const MAX_BULK_LAUNCH: usize = 10;
 pub enum FleetOp {
     Fetch,
     Pull,
+    StageAll,
+    Push,
+    /// Manual bulk commit — same user-typed message on every selected repo.
+    /// Only started through the message strip ([`OrreryApp::confirm_fleet_commit`]).
+    CommitAll,
+    /// Per-repo AI message from that repo's working tree, then `commit_all`.
+    GenerateAndCommit,
     /// Only ever started through the confirm strip
     /// ([`OrreryApp::confirm_fleet_prune`]) — never directly from a button.
     Prune,
@@ -72,6 +80,10 @@ impl FleetOp {
         match self {
             FleetOp::Fetch => "Fetching",
             FleetOp::Pull => "Pulling",
+            FleetOp::StageAll => "Staging",
+            FleetOp::Push => "Pushing",
+            FleetOp::CommitAll => "Committing",
+            FleetOp::GenerateAndCommit => "Generating",
             FleetOp::Prune => "Pruning",
             FleetOp::ResetHard => "Resetting",
         }
@@ -82,10 +94,21 @@ impl FleetOp {
         match self {
             FleetOp::Fetch => "Fetch",
             FleetOp::Pull => "Pull",
+            FleetOp::StageAll => "Stage all",
+            FleetOp::Push => "Push",
+            FleetOp::CommitAll => "Commit",
+            FleetOp::GenerateAndCommit => "Generate & commit",
             FleetOp::Prune => "Prune",
             FleetOp::ResetHard => "Reset hard",
         }
     }
+}
+
+/// Pending bulk-commit message prompt on the fleet bar. Dropped on selection
+/// change / Esc / Cancel / another run starting.
+pub struct CommitPlan {
+    pub repos: Vec<String>,
+    pub input: gpui::Entity<gpui_component::input::InputState>,
 }
 
 /// A pending bulk-prune confirm on the fleet bar (see the module docs for the
@@ -127,9 +150,10 @@ pub struct FleetRun {
 impl OrreryApp {
     /// Toggle a repo in/out of the multi-selection (card checkbox, Ctrl+click).
     pub fn toggle_selected(&mut self, id: SharedString, cx: &mut Context<Self>) {
-        // Editing the selection invalidates a pending prune/reset confirm.
+        // Editing the selection invalidates a pending prune/reset/commit confirm.
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_commit = None;
         if !self.selected.remove(&id) {
             self.selected.insert(id);
         }
@@ -138,12 +162,23 @@ impl OrreryApp {
 
     /// Clear the multi-selection (fleet bar "Clear", or Esc with no overlay).
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.selected.is_empty() || self.fleet_prune.is_some() || self.fleet_reset.is_some() {
-            self.selected.clear();
-            self.fleet_prune = None;
-            self.fleet_reset = None;
+        if !self.selected.is_empty()
+            || self.fleet_prune.is_some()
+            || self.fleet_reset.is_some()
+            || self.fleet_commit.is_some()
+        {
+            self.clear_selection_quiet();
             cx.notify();
         }
+    }
+
+    /// Drop selection + pending fleet confirms without notifying — used when a
+    /// Mission Control filter changes and the caller will `cx.notify()` itself.
+    pub(crate) fn clear_selection_quiet(&mut self) {
+        self.selected.clear();
+        self.fleet_prune = None;
+        self.fleet_reset = None;
+        self.fleet_commit = None;
     }
 
     /// Select every row passing the current filters (the fleet bar's
@@ -152,6 +187,7 @@ impl OrreryApp {
     pub fn select_all_visible(&mut self, cx: &mut Context<Self>) {
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_commit = None;
         for i in self.visible_rows() {
             let id = self.rows[i].id.clone();
             self.selected.insert(id);
@@ -186,6 +222,7 @@ impl OrreryApp {
         }
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_commit = None;
         self.selected = matched;
         cx.notify();
     }
@@ -228,13 +265,42 @@ impl OrreryApp {
     /// marshals onto the foreground via a channel and keeps a keyed Progress
     /// toast current; completion resolves the toast to the aggregate summary
     /// and rescans once.
+    ///
+    /// `commit_message` is required for [`FleetOp::CommitAll`] (one shared
+    /// message). [`FleetOp::GenerateAndCommit`] ignores it and generates a
+    /// fresh AI message per repo from that repo's own working tree.
     pub fn run_fleet_repos(&mut self, op: FleetOp, repos: Vec<String>, cx: &mut Context<Self>) {
+        self.run_fleet_repos_msg(op, repos, None, cx);
+    }
+
+    pub fn run_fleet_repos_msg(
+        &mut self,
+        op: FleetOp,
+        repos: Vec<String>,
+        commit_message: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.fleet_run.is_some() || repos.is_empty() {
             return;
         }
-        // Starting any run invalidates a pending prune/reset confirm.
+        if matches!(op, FleetOp::CommitAll)
+            && commit_message
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|m| m.is_empty())
+        {
+            self.push_toast(
+                ToastKind::Error,
+                "Commit message required",
+                Some("Enter a message before committing the selection.".into()),
+                cx,
+            );
+            return;
+        }
+        // Starting any run invalidates a pending prune/reset/commit confirm.
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_commit = None;
         let total = repos.len();
         self.fleet_seq += 1;
         let run_id = self.fleet_seq;
@@ -288,6 +354,13 @@ impl OrreryApp {
             .detach();
         }
 
+        // Generate & commit hits the AI per repo — keep concurrency low so we
+        // don't stampede Ollama/llama.cpp.
+        let workers = match op {
+            FleetOp::GenerateAndCommit => 2.min(fleet::default_workers()),
+            _ => fleet::default_workers(),
+        };
+
         cx.spawn(async move |this, cx| {
             let report = cx
                 .background_executor()
@@ -297,13 +370,31 @@ impl OrreryApp {
                         // `tx` (owned by this closure) drops when the engine
                         // returns, closing the channel and ending the drain.
                     };
-                    let workers = fleet::default_workers();
                     match op {
                         FleetOp::Fetch => {
                             fleet::run(&repos, workers, &cancel, progress, fleet::fetch_op())
                         }
                         FleetOp::Pull => {
                             fleet::run(&repos, workers, &cancel, progress, fleet::pull_op())
+                        }
+                        FleetOp::StageAll => {
+                            fleet::run(&repos, workers, &cancel, progress, fleet::stage_all_op())
+                        }
+                        FleetOp::Push => {
+                            fleet::run(&repos, workers, &cancel, progress, fleet::push_op())
+                        }
+                        FleetOp::CommitAll => {
+                            let msg = commit_message.unwrap_or_default();
+                            fleet::run(
+                                &repos,
+                                workers,
+                                &cancel,
+                                progress,
+                                fleet::commit_all_op(msg),
+                            )
+                        }
+                        FleetOp::GenerateAndCommit => {
+                            fleet::run(&repos, workers, &cancel, progress, generate_and_commit_op())
                         }
                         FleetOp::Prune => {
                             fleet::run(&repos, workers, &cancel, progress, fleet::prune_op())
@@ -327,12 +418,92 @@ impl OrreryApp {
         .detach();
     }
 
+    /// Open the fleet-bar commit-message strip for the current selection.
+    /// Nothing is committed until [`Self::confirm_fleet_commit`].
+    pub fn start_fleet_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.fleet_run.is_some()
+            || self.fleet_commit.is_some()
+            || self.fleet_prune.is_some()
+            || self.fleet_reset.is_some()
+        {
+            return;
+        }
+        let repos: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| self.selected.contains(&r.id))
+            .map(|r| r.id.to_string())
+            .collect();
+        if repos.is_empty() {
+            return;
+        }
+        let n = repos.len();
+        let input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx).placeholder(format!(
+                "Commit message for {n} {}",
+                if n == 1 { "repo" } else { "repos" }
+            ))
+        });
+        self.fleet_commit = Some(CommitPlan { repos, input });
+        cx.notify();
+    }
+
+    /// Commit the planned selection with the strip's message (one shared text).
+    pub fn confirm_fleet_commit(&mut self, cx: &mut Context<Self>) {
+        let Some(plan) = self.fleet_commit.take() else {
+            return;
+        };
+        let message = plan.input.read(cx).value().to_string();
+        if message.trim().is_empty() {
+            self.fleet_commit = Some(plan);
+            self.push_toast(
+                ToastKind::Error,
+                "Commit message required",
+                Some("Enter a message before committing the selection.".into()),
+                cx,
+            );
+            return;
+        }
+        self.run_fleet_repos_msg(FleetOp::CommitAll, plan.repos, Some(message), cx);
+    }
+
+    pub fn cancel_fleet_commit(&mut self, cx: &mut Context<Self>) {
+        if self.fleet_commit.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Bulk Generate & commit: each selected repo gets its own AI message from
+    /// that repo's working tree, then `commit_all`. Gated on `ai_ready`.
+    pub fn run_fleet_generate_and_commit(&mut self, cx: &mut Context<Self>) {
+        if !self.services.ai_ready {
+            self.push_toast(
+                ToastKind::Error,
+                "AI unavailable",
+                Some("Enable Ollama / AI in Settings first.".into()),
+                cx,
+            );
+            return;
+        }
+        let repos: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| self.selected.contains(&r.id))
+            .map(|r| r.id.to_string())
+            .collect();
+        self.run_fleet_repos(FleetOp::GenerateAndCommit, repos, cx);
+    }
+
     /// The fleet bar's Prune button: scan the selected repos for prunable
     /// branches on the background executor (the Cleanup view's scan), then
     /// expand the bar into the confirm strip with the per-repo breakdown.
     /// Nothing is deleted here — only [`Self::confirm_fleet_prune`] executes.
     pub fn start_fleet_prune(&mut self, cx: &mut Context<Self>) {
-        if self.fleet_run.is_some() || self.fleet_prune.is_some() || self.fleet_reset.is_some() {
+        if self.fleet_run.is_some()
+            || self.fleet_prune.is_some()
+            || self.fleet_reset.is_some()
+            || self.fleet_commit.is_some()
+        {
             return;
         }
         // Grid order, so the breakdown reads like the grid.
@@ -425,7 +596,11 @@ impl OrreryApp {
     /// Arm a hard-reset confirm for the current selection (`git reset --hard
     /// @{upstream}` per repo). Nothing is reset until [`Self::confirm_fleet_reset`].
     pub fn start_fleet_reset(&mut self, cx: &mut Context<Self>) {
-        if self.fleet_run.is_some() || self.fleet_reset.is_some() || self.fleet_prune.is_some() {
+        if self.fleet_run.is_some()
+            || self.fleet_reset.is_some()
+            || self.fleet_prune.is_some()
+            || self.fleet_commit.is_some()
+        {
             return;
         }
         let repos: Vec<String> = self
@@ -524,8 +699,11 @@ impl OrreryApp {
         if self.selected.is_empty() && self.fleet_run.is_none() {
             return None;
         }
-        let idle =
-            self.fleet_run.is_none() && self.fleet_prune.is_none() && self.fleet_reset.is_none();
+        let idle = self.fleet_run.is_none()
+            && self.fleet_prune.is_none()
+            && self.fleet_reset.is_none()
+            && self.fleet_commit.is_none();
+        let ai_ready = self.services.ai_ready;
         let mut bar = div()
             .flex()
             .flex_row()
@@ -601,6 +779,45 @@ impl OrreryApp {
                 cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::Pull, cx)),
             ))
             .child(bar_btn(
+                "fleet-stage",
+                "plus-square",
+                FleetOp::StageAll.label(),
+                idle,
+                false,
+                t,
+                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::StageAll, cx)),
+            ))
+            .child(bar_btn(
+                "fleet-commit",
+                "git-commit",
+                "Commit…",
+                idle,
+                false,
+                t,
+                cx.listener(|this, _e, window, cx| this.start_fleet_commit(window, cx)),
+            ));
+        if ai_ready {
+            bar = bar.child(bar_btn(
+                "fleet-gen-commit",
+                "sparkles",
+                "Generate & commit",
+                idle,
+                false,
+                t,
+                cx.listener(|this, _e, _w, cx| this.run_fleet_generate_and_commit(cx)),
+            ));
+        }
+        bar = bar
+            .child(bar_btn(
+                "fleet-push",
+                "upload",
+                FleetOp::Push.label(),
+                idle,
+                false,
+                t,
+                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::Push, cx)),
+            ))
+            .child(bar_btn(
                 "fleet-prune",
                 "scissors",
                 FleetOp::Prune.label(),
@@ -636,6 +853,63 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _e, _w, cx| this.clear_selection(cx)),
             ));
+        // A pending commit-message strip expands above the buttons row.
+        if let Some(plan) = &self.fleet_commit {
+            let n = plan.repos.len();
+            let input = plan.input.clone();
+            let strip = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.))
+                .px(px(16.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(rgb(t.border))
+                .bg(rgb(t.surface))
+                .child(lucide("git-commit", 15., t.accent_bright))
+                .child(
+                    div()
+                        .text_size(px(t.text_small))
+                        .text_color(rgb(t.fg1))
+                        .child(SharedString::from(format!(
+                            "Message for {n} {}",
+                            if n == 1 { "repo" } else { "repos" }
+                        ))),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(120.))
+                        .child(gpui_component::input::Input::new(&input)),
+                )
+                .child(bar_btn(
+                    "fleet-commit-confirm",
+                    "git-commit",
+                    "Commit",
+                    true,
+                    false,
+                    t,
+                    cx.listener(|this, _e, _w, cx| this.confirm_fleet_commit(cx)),
+                ))
+                .child(bar_btn(
+                    "fleet-commit-cancel",
+                    "x",
+                    "Cancel",
+                    true,
+                    false,
+                    t,
+                    cx.listener(|this, _e, _w, cx| this.cancel_fleet_commit(cx)),
+                ));
+            return Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(strip)
+                    .child(bar)
+                    .into_any_element(),
+            );
+        }
         // A pending reset confirm expands the bar into a danger strip.
         if let Some(repos) = &self.fleet_reset {
             let n = repos.len();
@@ -921,6 +1195,46 @@ fn clip(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
         out
+    }
+}
+
+/// Per-repo Generate & commit for the fleet engine: working_diff (else
+/// staged_diff) → AI `commit_message` → `commit_all`. Each repo gets its own
+/// message from its own tree — never a shared message across the selection.
+fn generate_and_commit_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| {
+        let full = orrery_core::git_ops::working_diff(path).unwrap_or_default();
+        let diff = if !full.trim().is_empty() {
+            full
+        } else {
+            orrery_core::git_ops::staged_diff(path).unwrap_or_default()
+        };
+        if diff.trim().is_empty() {
+            return Outcome::Skipped("nothing to commit".into());
+        }
+        let msg = crate::task::block_on({
+            let diff = diff.clone();
+            async move { orrery_core::ai::commit_message(&diff).await }
+        });
+        let message = match msg {
+            Ok(m) => m,
+            Err(e) => return Outcome::Failed(format!("generate: {e}")),
+        };
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return Outcome::Failed("empty AI commit message".into());
+        }
+        match orrery_core::git_ops::commit_all(path, trimmed) {
+            Ok(hash) => {
+                let subject =
+                    crate::data::oneline(orrery_core::ai::split_commit_message(trimmed).0);
+                Outcome::Ok(format!("committed {hash} — {subject}"))
+            }
+            Err(e) if e == "no staged changes to commit" => {
+                Outcome::Skipped("nothing to commit".into())
+            }
+            Err(e) => Outcome::Failed(e),
+        }
     }
 }
 

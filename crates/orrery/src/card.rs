@@ -8,14 +8,111 @@ use gpui::{
     App, ClickEvent, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
+use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use orrery_core::{cache, launch};
 
 use crate::data::Row;
+use crate::fleet::FleetOp;
 use crate::icon::{brand, langicon, lucide};
 use crate::shell::OrreryApp;
 use crate::theme::{Theme, devicon_stem, lang_color};
 
 const MONO: &str = "monospace";
+
+/// Shared right-click actions for a repo card, list row, or TREE row.
+///
+/// Action visibility is gated by repo state (`can_stage` / `can_commit` /
+/// `can_push`) and by `can_generate` (`aiReady` ∧ dirty) so AI items stay
+/// hidden when the backend is unreachable. When the fleet selection is
+/// non-empty, also offers bulk Commit / Generate & commit over that set.
+pub(crate) fn fill_repo_context_menu(
+    menu: PopupMenu,
+    app: Entity<OrreryApp>,
+    repo_id: SharedString,
+    can_stage: bool,
+    can_commit: bool,
+    can_generate: bool,
+    can_push: bool,
+    selection_n: usize,
+    fleet_ai_ready: bool,
+) -> PopupMenu {
+    let mut m = menu;
+    let (a1, id1) = (app.clone(), repo_id.clone());
+    m = m.item(
+        PopupMenuItem::new("Open drawer").on_click(move |_, window, cx| {
+            a1.update(cx, |this, cx| this.open_drawer(id1.clone(), window, cx));
+        }),
+    );
+    if can_stage {
+        let (a, id) = (app.clone(), repo_id.clone());
+        m = m.item(PopupMenuItem::new("Stage all").on_click(move |_, _, cx| {
+            a.update(cx, |this, cx| {
+                this.run_fleet_repos(FleetOp::StageAll, vec![id.to_string()], cx);
+            });
+        }));
+    }
+    if can_commit {
+        let (a_open, id_open) = (app.clone(), repo_id.clone());
+        m = m.item(
+            PopupMenuItem::new("Commit All…").on_click(move |_, window, cx| {
+                a_open.update(cx, |this, cx| this.open_drawer(id_open.clone(), window, cx));
+            }),
+        );
+    }
+    if can_generate {
+        let (a, id) = (app.clone(), repo_id.clone());
+        m = m.item(
+            PopupMenuItem::new("Generate & commit").on_click(move |_, window, cx| {
+                a.update(cx, |this, cx| {
+                    this.repo_generate_and_commit(id.clone(), window, cx);
+                });
+            }),
+        );
+    }
+    // Bulk actions over the shared fleet selection (TREE + Mission Control).
+    if selection_n > 0 {
+        m = m.separator();
+        let a_commit = app.clone();
+        m = m.item(
+            PopupMenuItem::new(format!("Commit selected ({selection_n})…")).on_click(
+                move |_, window, cx| {
+                    a_commit.update(cx, |this, cx| this.start_fleet_commit(window, cx));
+                },
+            ),
+        );
+        if fleet_ai_ready {
+            let a_gen = app.clone();
+            m = m.item(
+                PopupMenuItem::new(format!("Generate & commit selected ({selection_n})")).on_click(
+                    move |_, _, cx| {
+                        a_gen.update(cx, |this, cx| this.run_fleet_generate_and_commit(cx));
+                    },
+                ),
+            );
+        }
+    }
+    if can_push {
+        let (a, id) = (app.clone(), repo_id.clone());
+        m = m.item(PopupMenuItem::new("Push").on_click(move |_, _, cx| {
+            a.update(cx, |this, cx| {
+                this.run_fleet_repos(FleetOp::Push, vec![id.to_string()], cx);
+            });
+        }));
+    }
+    let (a_f, id_f) = (app.clone(), repo_id.clone());
+    let (a_p, id_p) = (app, repo_id);
+    m.separator()
+        .item(PopupMenuItem::new("Fetch").on_click(move |_, _, cx| {
+            a_f.update(cx, |this, cx| {
+                this.run_fleet_repos(FleetOp::Fetch, vec![id_f.to_string()], cx);
+            });
+        }))
+        .item(PopupMenuItem::new("Pull").on_click(move |_, _, cx| {
+            a_p.update(cx, |this, cx| {
+                this.run_fleet_repos(FleetOp::Pull, vec![id_p.to_string()], cx);
+            });
+        }))
+}
 
 /// Per-card interactive state, resolved by the caller inside the
 /// `uniform_list` render closure (cheap per-row lookups by id — no allocation).
@@ -231,6 +328,17 @@ pub fn card(
                 ))
                 .child(lang_mark(&row.language, t))
                 .child(div().min_w(px(0.)).truncate().child(row.name.clone()))
+                .children((row.child_count > 0).then(|| {
+                    div()
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(t.r_xs))
+                        .bg(rgb(t.button_bg))
+                        .font_family(MONO)
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg2))
+                        .child(SharedString::from(format!("{} sub", row.child_count)))
+                }))
                 // Live agent session running in this repo.
                 .children(
                     state
@@ -423,6 +531,11 @@ pub fn card(
 
     // ── card shell (hover lift via border/bg; accent border when selected) ─
     let (hov_border, hov_bg) = (t.border_accent, t.surface_hover);
+    let app_menu = app.clone();
+    let repo_id = row.id.clone();
+    let can_stage = row.unstaged > 0;
+    let can_commit = row.dirty > 0;
+    let can_push = row.ahead > 0;
     div()
         .id(SharedString::from(format!("card-{idx}")))
         .group(group)
@@ -442,6 +555,23 @@ pub fn card(
         .rounded(px(t.r_md))
         .overflow_hidden()
         .hover(move |s| s.border_color(rgb(hov_border)).bg(rgb(hov_bg)))
+        .context_menu(move |menu, _window, cx| {
+            let st = app_menu.read(cx);
+            let can_generate = can_commit && st.services.ai_ready;
+            let selection_n = st.selected.len();
+            let fleet_ai = st.services.ai_ready;
+            fill_repo_context_menu(
+                menu,
+                app_menu.clone(),
+                repo_id.clone(),
+                can_stage,
+                can_commit,
+                can_generate,
+                can_push,
+                selection_n,
+                fleet_ai,
+            )
+        })
         .child(body)
         .child(acts)
 }
@@ -634,6 +764,11 @@ pub(crate) fn list_item(
     }
 
     let hov_bg = t.surface_hover;
+    let app_menu = app.clone();
+    let repo_id = row.id.clone();
+    let can_stage = row.unstaged > 0;
+    let can_commit = row.dirty > 0;
+    let can_push = row.ahead > 0;
     let mut shell = div()
         .id(SharedString::from(format!("lrow-{idx}")))
         .group(group)
@@ -647,6 +782,23 @@ pub(crate) fn list_item(
         .border_b_1()
         .border_color(rgb(t.border))
         .hover(move |s| s.bg(rgb(hov_bg)))
+        .context_menu(move |menu, _window, cx| {
+            let st = app_menu.read(cx);
+            let can_generate = can_commit && st.services.ai_ready;
+            let selection_n = st.selected.len();
+            let fleet_ai = st.services.ai_ready;
+            fill_repo_context_menu(
+                menu,
+                app_menu.clone(),
+                repo_id.clone(),
+                can_stage,
+                can_commit,
+                can_generate,
+                can_push,
+                selection_n,
+                fleet_ai,
+            )
+        })
         .child(select)
         .child(fav_star)
         .child(open)

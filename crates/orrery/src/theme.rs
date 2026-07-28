@@ -242,7 +242,8 @@ pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     c.secondary_active = rgb(t.border_strong).into();
     c.muted = rgb(t.surface).into();
     c.sidebar = rgb(t.page).into();
-    c.title_bar = rgb(t.surface).into();
+    // Lift the title bar a step above page so min/max/close icons contrast.
+    c.title_bar = rgb(t.button_bg).into();
     c.title_bar_border = rgb(t.border_strong).into();
     c.input = rgb(t.button_bg).into();
     c.tab_active = rgb(t.surface).into();
@@ -251,8 +252,10 @@ pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     c.foreground = rgb(t.fg0).into();
     c.popover_foreground = rgb(t.fg1).into();
     c.secondary_foreground = rgb(t.fg0).into();
+    c.button_secondary_foreground = rgb(t.fg0).into();
+    c.button_foreground = rgb(t.fg0).into();
     c.sidebar_foreground = rgb(t.fg1).into();
-    c.muted_foreground = rgb(t.fg3).into();
+    c.muted_foreground = rgb(t.fg2).into();
     c.accent_foreground = rgb(t.fg0).into();
     c.primary_foreground = rgb(t.page).into();
     c.danger_foreground = rgb(0xffffff).into();
