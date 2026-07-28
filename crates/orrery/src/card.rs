@@ -13,7 +13,7 @@ use orrery_core::attention::Severity;
 use orrery_core::{cache, launch};
 
 use crate::data::Row;
-use crate::fleet::FleetOp;
+use crate::fleet::{self, FleetOp};
 use crate::icon::{brand, langicon, lucide};
 use crate::shell::OrreryApp;
 use crate::theme::{Theme, devicon_stem, lang_color};
@@ -25,8 +25,8 @@ const MONO: &str = "monospace";
 /// Action visibility is gated by repo state (`can_stage` / `can_commit` /
 /// `can_push` / `can_update_submodules`) and by `can_generate` (`aiReady` ∧
 /// dirty) so AI items stay hidden when the backend is unreachable. When the
-/// fleet selection is non-empty, also offers bulk Commit / Generate & commit
-/// over that set.
+/// fleet selection includes this repo, also offers the full bulk Actions menu
+/// (same items as the top gear dropdown) over that set.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_repo_context_menu(
     menu: PopupMenu,
@@ -37,8 +37,12 @@ pub(crate) fn fill_repo_context_menu(
     can_generate: bool,
     can_push: bool,
     can_update_submodules: bool,
-    selection_n: usize,
+    fleet_targets: Vec<String>,
     fleet_ai_ready: bool,
+    fleet_has_dirty: bool,
+    fleet_idle: bool,
+    host_url: SharedString,
+    host: SharedString,
 ) -> PopupMenu {
     let mut m = menu;
     let (a1, id1) = (app.clone(), repo_id.clone());
@@ -47,6 +51,13 @@ pub(crate) fn fill_repo_context_menu(
             a1.update(cx, |this, cx| this.open_drawer(id1.clone(), window, cx));
         }),
     );
+    if !host_url.is_empty() {
+        let url = host_url;
+        let label = crate::data::open_on_host_label(host.as_ref());
+        m = m.item(PopupMenuItem::new(label).on_click(move |_, _, _cx| {
+            let _ = launch::open(&url);
+        }));
+    }
     if can_stage {
         let (a, id) = (app.clone(), repo_id.clone());
         m = m.item(PopupMenuItem::new("Stage all").on_click(move |_, _, cx| {
@@ -81,28 +92,6 @@ pub(crate) fn fill_repo_context_menu(
             }),
         );
     }
-    // Bulk actions over the shared fleet selection (TREE + Mission Control).
-    if selection_n > 0 {
-        m = m.separator();
-        let a_commit = app.clone();
-        m = m.item(
-            PopupMenuItem::new(format!("Commit selected ({selection_n})…")).on_click(
-                move |_, window, cx| {
-                    a_commit.update(cx, |this, cx| this.start_fleet_commit(window, cx));
-                },
-            ),
-        );
-        if fleet_ai_ready {
-            let a_gen = app.clone();
-            m = m.item(
-                PopupMenuItem::new(format!("Generate & commit selected ({selection_n})")).on_click(
-                    move |_, _, cx| {
-                        a_gen.update(cx, |this, cx| this.run_fleet_generate_and_commit(cx));
-                    },
-                ),
-            );
-        }
-    }
     if can_push {
         let (a, id) = (app.clone(), repo_id.clone());
         m = m.item(PopupMenuItem::new("Push").on_click(move |_, _, cx| {
@@ -126,7 +115,7 @@ pub(crate) fn fill_repo_context_menu(
             });
         }));
     if can_update_submodules {
-        let (a, id) = (app, repo_id);
+        let (a, id) = (app.clone(), repo_id.clone());
         m = m.item(
             PopupMenuItem::new("Update submodules").on_click(move |_, _, cx| {
                 a.update(cx, |this, cx| {
@@ -135,7 +124,60 @@ pub(crate) fn fill_repo_context_menu(
             }),
         );
     }
+    let (a_pr, id_pr) = (app.clone(), repo_id.clone());
+    m = m.item(PopupMenuItem::new("Prune").on_click(move |_, _, cx| {
+        a_pr.update(cx, |this, cx| {
+            this.adopt_fleet_targets(&[id_pr.to_string()]);
+            this.start_fleet_prune(cx);
+        });
+    }));
+    let (a_rs, id_rs) = (app.clone(), repo_id.clone());
+    m = m.item(PopupMenuItem::new("Reset hard").on_click(move |_, _, cx| {
+        a_rs.update(cx, |this, cx| {
+            this.adopt_fleet_targets(&[id_rs.to_string()]);
+            this.start_fleet_reset(cx);
+        });
+    }));
+    let (a_ide, id_ide) = (app.clone(), repo_id.clone());
+    m = m.item(PopupMenuItem::new("Open in IDE").on_click(move |_, _, cx| {
+        a_ide.update(cx, |this, cx| {
+            this.adopt_fleet_targets(&[id_ide.to_string()]);
+            this.launch_selected(cx);
+        });
+    }));
+    // Full fleet Actions when this repo is part of a multi-selection.
+    let in_selection = fleet_targets
+        .iter()
+        .any(|id| id.as_str() == repo_id.as_ref());
+    if in_selection && fleet_targets.len() > 1 {
+        let n = fleet_targets.len();
+        m = m.separator().label(format!("Selection ({n})"));
+        m = fleet::fill_fleet_actions_menu(
+            m,
+            app,
+            fleet_targets,
+            fleet_ai_ready,
+            fleet_has_dirty,
+            fleet_idle,
+            None,
+        );
+    }
     m
+}
+
+/// Selection-scoped fleet targets for context menus: if the clicked repo is in
+/// the multi-selection, return that whole set (grid order); otherwise just the
+/// clicked repo.
+pub(crate) fn fleet_context_targets(app: &OrreryApp, repo_id: &str) -> Vec<String> {
+    if !app.selected.is_empty() && app.selected.iter().any(|id| id.as_ref() == repo_id) {
+        app.rows
+            .iter()
+            .filter(|r| app.selected.contains(&r.id))
+            .map(|r| r.id.to_string())
+            .collect()
+    } else {
+        vec![repo_id.to_string()]
+    }
 }
 
 /// Per-card interactive state, resolved by the caller inside the
@@ -679,8 +721,19 @@ pub fn card(
             let st = app_menu.read(cx);
             let can_generate = can_commit && st.services.ai_ready;
             let can_push = ahead > 0 && !st.is_pull_only(repo_id.as_ref());
-            let selection_n = st.selected.len();
             let fleet_ai = st.services.ai_ready;
+            let fleet_targets = fleet_context_targets(st, repo_id.as_ref());
+            let fleet_has_dirty = st
+                .rows
+                .iter()
+                .any(|r| st.selected.contains(&r.id) && r.dirty > 0);
+            let fleet_idle = st.fleet_actions_idle();
+            let (host_url, host) = st
+                .rows
+                .iter()
+                .find(|r| r.id.as_ref() == repo_id.as_ref())
+                .map(|r| (r.url.clone(), r.host.clone()))
+                .unwrap_or_default();
             fill_repo_context_menu(
                 menu,
                 app_menu.clone(),
@@ -690,8 +743,12 @@ pub fn card(
                 can_generate,
                 can_push,
                 can_update_submodules,
-                selection_n,
+                fleet_targets,
                 fleet_ai,
+                fleet_has_dirty,
+                fleet_idle,
+                host_url,
+                host,
             )
         })
         .child(body)
@@ -915,8 +972,19 @@ pub(crate) fn list_item(
             let st = app_menu.read(cx);
             let can_generate = can_commit && st.services.ai_ready;
             let can_push = ahead > 0 && !st.is_pull_only(repo_id.as_ref());
-            let selection_n = st.selected.len();
             let fleet_ai = st.services.ai_ready;
+            let fleet_targets = fleet_context_targets(st, repo_id.as_ref());
+            let fleet_has_dirty = st
+                .rows
+                .iter()
+                .any(|r| st.selected.contains(&r.id) && r.dirty > 0);
+            let fleet_idle = st.fleet_actions_idle();
+            let (host_url, host) = st
+                .rows
+                .iter()
+                .find(|r| r.id.as_ref() == repo_id.as_ref())
+                .map(|r| (r.url.clone(), r.host.clone()))
+                .unwrap_or_default();
             fill_repo_context_menu(
                 menu,
                 app_menu.clone(),
@@ -926,8 +994,12 @@ pub(crate) fn list_item(
                 can_generate,
                 can_push,
                 can_update_submodules,
-                selection_n,
+                fleet_targets,
                 fleet_ai,
+                fleet_has_dirty,
+                fleet_idle,
+                host_url,
+                host,
             )
         })
         .child(select)

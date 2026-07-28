@@ -918,6 +918,43 @@ fn header(row: &Row, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
         title = title.child(brand(&row.host, 15., t.fg2));
     }
 
+    let mut trailing = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .flex_shrink_0();
+    if !row.url.is_empty() {
+        let url = row.url.clone();
+        let label = crate::data::open_on_host_label(row.host.as_ref());
+        let (hov_border, hov_fg) = (t.border_strong, t.fg0);
+        trailing = trailing.child(
+            div()
+                .id("drawer-open-host")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(t.r_sm))
+                .bg(rgb(t.button_bg))
+                .border_1()
+                .border_color(rgb(t.border))
+                .font_family(MONO)
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg1))
+                .cursor_pointer()
+                .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
+                .on_click(move |_ev, _win, _cx| {
+                    let _ = launch::open(&url);
+                })
+                .child(lucide("external-link", 13., t.fg2))
+                .child(SharedString::from(label)),
+        );
+    }
+    trailing = trailing.child(close);
+
     div()
         .flex()
         .flex_row()
@@ -944,7 +981,7 @@ fn header(row: &Row, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
                         .child(SharedString::from(format!("{} · {}", row.slug, row.path))),
                 ),
         )
-        .child(close)
+        .child(trailing)
 }
 
 /// The owner/name slug if this repo is a usable GitHub remote, else `None`.

@@ -32,9 +32,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
-    AppContext, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    AppContext, Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
+use gpui_component::button::Button;
+use gpui_component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
+use gpui_component::{IconName, Sizable};
 
 use orrery_core::fleet::{self, FleetReport, Outcome};
 
@@ -228,6 +231,33 @@ impl OrreryApp {
         } else {
             self.select_all_visible(cx);
         }
+    }
+
+    /// Replace the multi-selection with `repos` so selection-scoped fleet
+    /// starters (commit / prune / reset / launch) target an explicit set —
+    /// used by the Actions menu and right-click when the target isn't already
+    /// the current selection.
+    pub(crate) fn adopt_fleet_targets(&mut self, repos: &[String]) {
+        self.selected = repos.iter().cloned().map(SharedString::from).collect();
+    }
+
+    /// True when a fleet run or confirm strip is armed — the slim bottom bar
+    /// only paints in that case (actions live in the top Actions menu).
+    pub(crate) fn fleet_strip_active(&self) -> bool {
+        self.fleet_run.is_some()
+            || self.fleet_prune.is_some()
+            || self.fleet_reset.is_some()
+            || self.fleet_discard.is_some()
+            || self.fleet_commit.is_some()
+    }
+
+    /// Idle = no run and no confirm strip (Actions menu items enabled).
+    pub(crate) fn fleet_actions_idle(&self) -> bool {
+        self.fleet_run.is_none()
+            && self.fleet_prune.is_none()
+            && self.fleet_reset.is_none()
+            && self.fleet_discard.is_none()
+            && self.fleet_commit.is_none()
     }
 
     /// Replace the selection with the repos matching `pred` — the palette's
@@ -786,29 +816,13 @@ impl OrreryApp {
         }
     }
 
-    /// The fleet action bar, pinned under the grid. `None` (costing nothing)
-    /// until a selection exists or a run is active. Buttons disable while a
-    /// run is in flight (one bulk run at a time — replaced by a live counter
-    /// and Cancel) and while a prune confirm strip is pending above the bar.
-    /// Select-all lives on the filter chip row (checkbox beside "All"), not here.
+    /// Slim bottom strip: in-flight progress / Cancel, plus confirm strips for
+    /// commit / discard / reset / prune. Bulk action buttons live in the top
+    /// Actions dropdown (and the repo context menu) — not here.
     pub fn fleet_bar(&self, t: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.selected.is_empty()
-            && self.fleet_run.is_none()
-            && self.fleet_discard.is_none()
-            && self.fleet_reset.is_none()
-        {
+        if !self.fleet_strip_active() {
             return None;
         }
-        let idle = self.fleet_run.is_none()
-            && self.fleet_prune.is_none()
-            && self.fleet_reset.is_none()
-            && self.fleet_discard.is_none()
-            && self.fleet_commit.is_none();
-        let ai_ready = self.services.ai_ready;
-        let selection_has_dirty = self
-            .rows
-            .iter()
-            .any(|r| self.selected.contains(&r.id) && r.dirty > 0);
         let mut bar = div()
             .flex()
             .flex_row()
@@ -818,9 +832,9 @@ impl OrreryApp {
             .py(px(10.))
             .border_t_1()
             .border_color(rgb(t.border))
-            .bg(rgb(t.surface))
-            .child(lucide("check", 15., t.accent_bright))
-            .child(
+            .bg(rgb(t.surface));
+        if !self.selected.is_empty() {
+            bar = bar.child(lucide("check", 15., t.accent_bright)).child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
                     .text_size(px(t.text_small))
@@ -830,6 +844,7 @@ impl OrreryApp {
                         self.selected.len()
                     ))),
             );
+        }
         if let Some(run) = &self.fleet_run {
             bar = bar
                 .child(
@@ -854,122 +869,7 @@ impl OrreryApp {
                     cx.listener(|this, _e, _w, cx| this.cancel_fleet(cx)),
                 ));
         }
-        bar = bar
-            .child(bar_btn(
-                "fleet-fetch",
-                "refresh-cw",
-                FleetOp::Fetch.label(),
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::Fetch, cx)),
-            ))
-            .child(bar_btn(
-                "fleet-pull",
-                "cloud-download",
-                FleetOp::Pull.label(),
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::Pull, cx)),
-            ))
-            .child(bar_btn(
-                "fleet-stage",
-                "plus-square",
-                FleetOp::StageAll.label(),
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::StageAll, cx)),
-            ))
-            .child(bar_btn(
-                "fleet-commit",
-                "git-commit",
-                "Commit…",
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, window, cx| this.start_fleet_commit(window, cx)),
-            ));
-        if ai_ready {
-            bar = bar.child(bar_btn(
-                "fleet-gen-commit",
-                "sparkles",
-                "Generate & commit",
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.run_fleet_generate_and_commit(cx)),
-            ));
-        }
-        bar = bar
-            .child(bar_btn(
-                "fleet-push",
-                "upload",
-                FleetOp::Push.label(),
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::Push, cx)),
-            ))
-            .child(bar_btn(
-                "fleet-submodules",
-                "git-branch",
-                FleetOp::SubmoduleUpdate.label(),
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::SubmoduleUpdate, cx)),
-            ))
-            .child(bar_btn(
-                "fleet-prune",
-                "scissors",
-                FleetOp::Prune.label(),
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.start_fleet_prune(cx)),
-            ))
-            .child(bar_btn(
-                "fleet-reset-hard",
-                "history",
-                "Reset hard",
-                idle,
-                true,
-                t,
-                cx.listener(|this, _e, _w, cx| this.start_fleet_reset(cx)),
-            ));
-        if selection_has_dirty {
-            bar = bar.child(bar_btn(
-                "fleet-discard",
-                "trash-2",
-                "Discard changes",
-                idle,
-                true,
-                t,
-                cx.listener(|this, _e, _w, cx| this.start_fleet_discard(cx)),
-            ));
-        }
-        bar = bar
-            .child(bar_btn(
-                "fleet-launch",
-                "code",
-                "Open in IDE",
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.launch_selected(cx)),
-            ))
-            .child(bar_btn(
-                "fleet-clear",
-                "x",
-                "Clear",
-                idle,
-                false,
-                t,
-                cx.listener(|this, _e, _w, cx| this.clear_selection(cx)),
-            ));
-        // A pending commit-message strip expands above the buttons row.
+        // A pending commit-message strip expands above the status row.
         if let Some(plan) = &self.fleet_commit {
             let n = plan.repos.len();
             let input = plan.input.clone();
@@ -1026,7 +926,7 @@ impl OrreryApp {
                     .into_any_element(),
             );
         }
-        // A pending discard confirm expands the bar into a danger strip.
+        // A pending discard confirm expands into a danger strip.
         if let Some(repos) = &self.fleet_discard {
             let n = repos.len();
             let strip = div()
@@ -1075,7 +975,7 @@ impl OrreryApp {
                     .into_any_element(),
             );
         }
-        // A pending reset confirm expands the bar into a danger strip.
+        // A pending reset confirm expands into a danger strip.
         if let Some(repos) = &self.fleet_reset {
             let n = repos.len();
             let strip = div()
@@ -1124,21 +1024,241 @@ impl OrreryApp {
                     .into_any_element(),
             );
         }
-        // A pending prune confirm expands the bar into a strip above the
-        // buttons row, showing the per-repo breakdown and Confirm/Cancel.
-        let Some(plan) = &self.fleet_prune else {
-            return Some(bar.into_any_element());
-        };
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .child(self.prune_strip(plan, t, cx))
-                .child(bar)
-                .into_any_element(),
-        )
+        // A pending prune confirm expands into a strip with Confirm/Cancel.
+        if let Some(plan) = &self.fleet_prune {
+            return Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(self.prune_strip(plan, t, cx))
+                    .child(bar)
+                    .into_any_element(),
+            );
+        }
+        Some(bar.into_any_element())
     }
 
+    /// Gear "Actions" dropdown for the Mission Control chip row — same fleet
+    /// ops the old bottom bar exposed, scoped to the current selection.
+    pub fn fleet_actions_button(&self, _t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = cx.entity();
+        let ai_ready = self.services.ai_ready;
+        let idle = self.fleet_actions_idle();
+        let has_dirty = self
+            .rows
+            .iter()
+            .any(|r| self.selected.contains(&r.id) && r.dirty > 0);
+        let repos: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| self.selected.contains(&r.id))
+            .map(|r| r.id.to_string())
+            .collect();
+        let n = repos.len();
+        let label = if n > 0 {
+            format!("Actions ({n})")
+        } else {
+            "Actions".into()
+        };
+        let open_remote = if n == 1 {
+            self.rows
+                .iter()
+                .find(|r| r.id.as_ref() == repos[0].as_str())
+                .filter(|r| !r.url.is_empty())
+                .map(|r| {
+                    (
+                        r.url.clone(),
+                        SharedString::from(crate::data::open_on_host_label(r.host.as_ref())),
+                    )
+                })
+        } else {
+            None
+        };
+        Button::new("mc-fleet-actions")
+            .outline()
+            .small()
+            .compact()
+            .icon(IconName::Settings)
+            .label(label)
+            .dropdown_caret(true)
+            .dropdown_menu(move |menu, _window, _cx| {
+                fill_fleet_actions_menu(
+                    menu,
+                    app.clone(),
+                    repos.clone(),
+                    ai_ready,
+                    has_dirty,
+                    idle,
+                    open_remote.clone(),
+                )
+            })
+    }
+}
+
+/// Shared fleet bulk-action items for the top Actions dropdown and the repo
+/// right-click menu. `repos` is the target set; empty → a hint label only.
+/// Confirm-gated ops (commit / prune / reset / discard) still arm the slim
+/// bottom confirm strip. `open_remote` is set for a single selection that has
+/// a forge URL ("Open on GitHub" / GitLab / remote).
+pub(crate) fn fill_fleet_actions_menu(
+    menu: PopupMenu,
+    app: Entity<OrreryApp>,
+    repos: Vec<String>,
+    ai_ready: bool,
+    has_dirty: bool,
+    enabled: bool,
+    open_remote: Option<(SharedString, SharedString)>,
+) -> PopupMenu {
+    if repos.is_empty() {
+        return menu.label("Select repos first");
+    }
+    let on = enabled;
+    let mut m = menu;
+
+    if let Some((url, label)) = open_remote {
+        m = m.item(
+            PopupMenuItem::new(label)
+                .disabled(!on)
+                .on_click(move |_, _, _cx| {
+                    let _ = orrery_core::launch::open(&url);
+                }),
+        );
+        m = m.separator();
+    }
+
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new("Fetch")
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.run_fleet_repos(FleetOp::Fetch, r.clone(), cx);
+                });
+            }),
+    );
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new("Pull")
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.run_fleet_repos(FleetOp::Pull, r.clone(), cx);
+                });
+            }),
+    );
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new(FleetOp::StageAll.label())
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.run_fleet_repos(FleetOp::StageAll, r.clone(), cx);
+                });
+            }),
+    );
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new("Commit…")
+            .disabled(!on)
+            .on_click(move |_, window, cx| {
+                a.update(cx, |this, cx| {
+                    this.adopt_fleet_targets(&r);
+                    this.start_fleet_commit(window, cx);
+                });
+            }),
+    );
+    if ai_ready {
+        let (a, r) = (app.clone(), repos.clone());
+        m = m.item(
+            PopupMenuItem::new("Generate & commit")
+                .disabled(!on)
+                .on_click(move |_, _, cx| {
+                    a.update(cx, |this, cx| {
+                        this.adopt_fleet_targets(&r);
+                        this.run_fleet_generate_and_commit(cx);
+                    });
+                }),
+        );
+    }
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new(FleetOp::Push.label())
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.run_fleet_repos(FleetOp::Push, r.clone(), cx);
+                });
+            }),
+    );
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new(FleetOp::SubmoduleUpdate.label())
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.run_fleet_repos(FleetOp::SubmoduleUpdate, r.clone(), cx);
+                });
+            }),
+    );
+    m = m.separator();
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new(FleetOp::Prune.label())
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.adopt_fleet_targets(&r);
+                    this.start_fleet_prune(cx);
+                });
+            }),
+    );
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new("Reset hard")
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.adopt_fleet_targets(&r);
+                    this.start_fleet_reset(cx);
+                });
+            }),
+    );
+    if has_dirty {
+        let (a, r) = (app.clone(), repos.clone());
+        m = m.item(
+            PopupMenuItem::new("Discard changes")
+                .disabled(!on)
+                .on_click(move |_, _, cx| {
+                    a.update(cx, |this, cx| {
+                        this.adopt_fleet_targets(&r);
+                        this.start_fleet_discard(cx);
+                    });
+                }),
+        );
+    }
+    m = m.separator();
+    let (a, r) = (app.clone(), repos.clone());
+    m = m.item(
+        PopupMenuItem::new("Open in IDE")
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.adopt_fleet_targets(&r);
+                    this.launch_selected(cx);
+                });
+            }),
+    );
+    let a = app;
+    m.item(
+        PopupMenuItem::new("Clear selection")
+            .disabled(!on)
+            .on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| this.clear_selection(cx));
+            }),
+    )
+}
+
+impl OrreryApp {
     /// The prune confirm strip (two-stage confirm, the #173 pattern scaled
     /// up): summary + per-repo breakdown while `Ready`, a scanning notice
     /// while the background scan runs. Danger-tinted like the Cleanup view's

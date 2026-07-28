@@ -47,6 +47,16 @@ pub struct Row {
     pub child_count: u32,
 }
 
+/// English label for opening the repo's forge page in a browser.
+/// `"github"` / `"gitlab"` → host-specific; anything else (incl. empty) → generic.
+pub fn open_on_host_label(host: &str) -> &'static str {
+    match host {
+        "github" => "Open on GitHub",
+        "gitlab" => "Open on GitLab",
+        _ => "Open remote",
+    }
+}
+
 pub(crate) fn rel_age(last_commit_unix: i64, now: i64) -> String {
     if last_commit_unix <= 0 {
         return "—".into();
@@ -374,7 +384,15 @@ pub fn rescan() -> Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::unwrap_soft_breaks;
+    use super::{open_on_host_label, unwrap_soft_breaks};
+
+    #[test]
+    fn open_on_host_label_by_host() {
+        assert_eq!(open_on_host_label("github"), "Open on GitHub");
+        assert_eq!(open_on_host_label("gitlab"), "Open on GitLab");
+        assert_eq!(open_on_host_label(""), "Open remote");
+        assert_eq!(open_on_host_label("bitbucket"), "Open remote");
+    }
 
     #[test]
     fn folds_hard_wrapped_paragraph() {

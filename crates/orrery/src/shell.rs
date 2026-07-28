@@ -4005,6 +4005,18 @@ impl OrreryApp {
                 let st = app_ent.read(cx);
                 let can_generate = can_commit && st.services.ai_ready;
                 let can_push = ahead > 0 && !st.is_pull_only(menu_id.as_ref());
+                let fleet_targets = crate::card::fleet_context_targets(st, menu_id.as_ref());
+                let fleet_has_dirty = st
+                    .rows
+                    .iter()
+                    .any(|r| st.selected.contains(&r.id) && r.dirty > 0);
+                let fleet_idle = st.fleet_actions_idle();
+                let (host_url, host) = st
+                    .rows
+                    .iter()
+                    .find(|r| r.id.as_ref() == menu_id.as_ref())
+                    .map(|r| (r.url.clone(), r.host.clone()))
+                    .unwrap_or_default();
                 crate::card::fill_repo_context_menu(
                     menu,
                     app_ent.clone(),
@@ -4014,8 +4026,12 @@ impl OrreryApp {
                     can_generate,
                     can_push,
                     can_update_submodules,
-                    st.selected.len(),
+                    fleet_targets,
                     st.services.ai_ready,
+                    fleet_has_dirty,
+                    fleet_idle,
+                    host_url,
+                    host,
                 )
             }));
             if has_children && expanded {
@@ -4087,6 +4103,18 @@ impl OrreryApp {
                             let st = app_c.read(cx);
                             let can_generate = can_commit && st.services.ai_ready;
                             let can_push = ahead > 0 && !st.is_pull_only(menu_id.as_ref());
+                            let fleet_targets =
+                                crate::card::fleet_context_targets(st, menu_id.as_ref());
+                            let fleet_has_dirty = st
+                                .rows
+                                .iter()
+                                .any(|r| st.selected.contains(&r.id) && r.dirty > 0);
+                            let (host_url, host) = st
+                                .rows
+                                .iter()
+                                .find(|r| r.id.as_ref() == menu_id.as_ref())
+                                .map(|r| (r.url.clone(), r.host.clone()))
+                                .unwrap_or_default();
                             crate::card::fill_repo_context_menu(
                                 menu,
                                 app_c.clone(),
@@ -4096,8 +4124,12 @@ impl OrreryApp {
                                 can_generate,
                                 can_push,
                                 can_update_submodules,
-                                st.selected.len(),
+                                fleet_targets,
                                 st.services.ai_ready,
+                                fleet_has_dirty,
+                                st.fleet_actions_idle(),
+                                host_url,
+                                host,
                             )
                         })
                         .child(child_box)
@@ -5435,7 +5467,7 @@ impl OrreryApp {
     }
 
     /// The single-select quick-filter chips (All / Public / … / Stale), with a
-    /// select-all checkbox immediately before the All chip.
+    /// select-all checkbox and Actions gear immediately before the All chip.
     fn filter_chips(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div()
             .flex()
@@ -5448,6 +5480,20 @@ impl OrreryApp {
         let hov = t.border_strong;
         // Select-all beside All — same visual language as card selection boxes.
         row = row.child(self.select_all_checkbox(t, cx));
+        // Fleet Actions gear (dropdown) next to the select-all checkbox.
+        row = row.child(self.fleet_actions_button(t, cx));
+        if !self.selected.is_empty() {
+            row = row.child(
+                div()
+                    .font_family("monospace")
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg2))
+                    .child(SharedString::from(format!(
+                        "{} selected",
+                        self.selected.len()
+                    ))),
+            );
+        }
         for f in RepoFilter::ORDER {
             let active = self.grid.filter == f;
             let (bg, border, fg) = if active {
