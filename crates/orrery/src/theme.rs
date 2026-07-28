@@ -227,29 +227,35 @@ pub fn lang_color(language: &str, fallback: u32) -> u32 {
 /// once after `gpui_component::init`, before opening the window.
 pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     use gpui::{px, rgb};
-    use gpui_component::ThemeMode;
+    use gpui_component::{ThemeMode, ThemeTokens};
 
     let c = gpui_component::Theme::global_mut(cx);
     c.mode = ThemeMode::Dark;
 
-    // Surfaces.
+    // Surfaces. Title bar sits slightly above the page so CSD window controls
+    // (min/max/close) have a distinct backdrop — TitleBar paints from
+    // `tokens.title_bar`, not the loose ThemeColor field alone.
     c.background = rgb(t.page).into();
     c.popover = rgb(t.surface).into();
-    c.secondary = rgb(t.surface).into();
+    c.secondary = rgb(t.button_bg).into();
+    c.secondary_hover = rgb(t.surface_hover).into();
+    c.secondary_active = rgb(t.border_strong).into();
     c.muted = rgb(t.surface).into();
     c.sidebar = rgb(t.page).into();
-    c.title_bar = rgb(t.page).into();
+    c.title_bar = rgb(t.surface).into();
+    c.title_bar_border = rgb(t.border_strong).into();
     c.input = rgb(t.button_bg).into();
     c.tab_active = rgb(t.surface).into();
 
-    // Text.
-    c.foreground = rgb(t.fg1).into();
+    // Text — window-control icons use `foreground` / `secondary_foreground`.
+    c.foreground = rgb(t.fg0).into();
     c.popover_foreground = rgb(t.fg1).into();
-    c.secondary_foreground = rgb(t.fg1).into();
+    c.secondary_foreground = rgb(t.fg0).into();
     c.sidebar_foreground = rgb(t.fg1).into();
     c.muted_foreground = rgb(t.fg3).into();
     c.accent_foreground = rgb(t.fg0).into();
     c.primary_foreground = rgb(t.page).into();
+    c.danger_foreground = rgb(0xffffff).into();
 
     // Borders / accents / state.
     c.border = rgb(t.border).into();
@@ -262,6 +268,7 @@ pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     c.link = rgb(t.accent_bright).into();
     c.scrollbar = rgb(t.border).into();
     c.danger = rgb(t.behind).into();
+    c.danger_active = rgb(0xe05555).into();
     c.success = rgb(t.clean).into();
     c.info = rgb(t.primary).into();
     c.warning = rgb(t.star).into();
@@ -269,4 +276,8 @@ pub fn apply_gpui_component_theme(t: &Theme, cx: &mut gpui::App) {
     // Shape / fonts.
     c.radius = px(t.r_md);
     c.mono_font_family = "monospace".into();
+
+    // TitleBar / buttons read `tokens.*`. Mutating ThemeColor via Deref does
+    // not refresh tokens — rebuild so CSD controls aren't light-on-light.
+    c.tokens = ThemeTokens::from(&c.colors);
 }

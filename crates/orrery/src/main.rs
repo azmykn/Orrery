@@ -22,15 +22,23 @@ mod toast;
 mod views;
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, actions, px,
-    size,
+    App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowDecorations,
+    WindowOptions, actions, px, size,
 };
-use gpui_component::Root;
+use gpui_component::{Root, TitleBar};
 
 use shell::{OrreryApp, View};
 use theme::Theme;
+
+/// Window / taskbar icon (X11). Wayland picks the icon via `app_id` + `.desktop`.
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!("../../../packaging/icons/128x128.png");
+    let img = image::load_from_memory(PNG).ok()?.into_rgba8();
+    Some(Arc::new(img))
+}
 
 actions!(
     orrery,
@@ -98,9 +106,22 @@ fn main() {
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // Client-side decorations (Wayland default) need an in-app
+                    // TitleBar for minimize / maximize / close. Without this the
+                    // window has no system chrome and no window-control buttons.
+                    titlebar: Some(TitleBar::title_bar_options()),
+                    window_decorations: Some(WindowDecorations::Client),
+                    // Matches packaging desktop file / icons for taskbar pin.
+                    app_id: Some("com.orrery.app".into()),
+                    icon: window_icon(),
                     ..Default::default()
                 },
                 |window, cx| {
+                    window.set_window_title("Orrery");
+                    let sidebar_width = config
+                        .sidebar_width
+                        .clamp(shell::SIDEBAR_MIN, shell::SIDEBAR_MAX);
+                    let sidebar_collapsed = config.sidebar_collapsed;
                     let view = cx.new(|cx| {
                         // Start the live wiring: filesystem watch, appearance,
                         // attention poll, and system tray all marshal back onto
@@ -149,7 +170,6 @@ fn main() {
                             settings: None,
                             devtools: None,
                             services: Default::default(),
-                            tray_active: tray.is_some(),
                             tray,
                             watcher,
                             selected: Default::default(),
@@ -157,22 +177,22 @@ fn main() {
                             fleet_seq: 0,
                             fleet_prune: None,
                             fleet_prune_seq: 0,
+                            fleet_reset: None,
                             toasts: Vec::new(),
                             toast_seq: 0,
                             grid: Default::default(),
                             view_filter: None,
                             focus: cx.focus_handle(),
+                            sidebar_width,
+                            sidebar_collapsed,
+                            sidebar_dragging: false,
+                            repo_search: None,
+                            _repo_search_sub: None,
                         }
                     });
-                    // Close-to-tray: when the tray is up, the window's close
-                    // button minimizes to the tray instead of quitting. Without a
-                    // tray we leave the default (close quits) so there's a way out.
-                    if view.read(cx).tray_active {
-                        window.on_window_should_close(cx, |window, _cx| {
-                            window.minimize_window();
-                            false
-                        });
-                    }
+                    // Close (✕) quits the app. Minimize (−) still hides the
+                    // window; the tray "Quit" entry also exits. (Earlier builds
+                    // remapped close → tray, which felt like a broken close button.)
                     // Probe AI reachability and build the semantic index in the
                     // background, so Ctrl+K can search by meaning. Also kick off a
                     // host-enrichment pass so cards fill in stars/visibility.

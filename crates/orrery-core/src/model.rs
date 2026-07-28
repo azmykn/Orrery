@@ -25,8 +25,14 @@ pub struct GitStatus {
     pub branch: String,
     pub ahead: u32,
     pub behind: u32,
-    /// Count of uncommitted changes in the working tree.
+    /// Count of paths with any uncommitted change (staged and/or unstaged).
     pub dirty: u32,
+    /// Paths with index (staged) changes vs HEAD.
+    #[serde(default)]
+    pub staged: u32,
+    /// Paths with working-tree changes vs the index (incl. untracked).
+    #[serde(default)]
+    pub unstaged: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +81,12 @@ pub struct Repo {
     pub favorite: bool,
     /// Local-AI summary (Phase 3).
     pub ai_summary: Option<String>,
+    /// Absolute path of the parent repo when this checkout is a git submodule.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Path relative to the parent as listed in `.gitmodules`, if a submodule.
+    #[serde(default)]
+    pub submodule_path: Option<String>,
 }
 
 /// Host-side enrichment for a repo, fetched from GitHub/GitLab.
@@ -163,6 +175,31 @@ pub struct AppConfig {
     /// + `notify_attention` like the urgent model kinds.
     #[serde(default = "default_true")]
     pub notify_agent_finished: bool,
+    /// Left-rail width in px when expanded (Mission Control chrome).
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+    /// Icon-only left rail when true.
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    /// Named repo groups (path prefixes) for bulk Fetch/Pull.
+    #[serde(default)]
+    pub workspace_groups: Vec<WorkspaceGroup>,
+    /// Active workspace group name, if any (filters Mission Control).
+    #[serde(default)]
+    pub active_workspace_group: Option<String>,
+}
+
+/// A named set of repos matched by absolute path prefixes (e.g. odoo19/core).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGroup {
+    pub name: String,
+    /// Repo path matches if it starts with any of these prefixes.
+    pub prefixes: Vec<String>,
+}
+
+pub(crate) fn default_sidebar_width() -> f32 {
+    236.0
 }
 
 pub(crate) fn default_agent_dispatch_args() -> String {

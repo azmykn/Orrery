@@ -55,6 +55,7 @@ serde_json = "1"
 urlencoding = "2"
 # Month-label date math for the contribution heatmap (core supplies the data).
 chrono = "0.4"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [lints.rust]
 unsafe_code = "warn"

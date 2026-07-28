@@ -191,6 +191,10 @@ pub struct DrawerData {
     pub committed: bool,
     /// A push kicked off from this drawer is still running.
     pub push_busy: bool,
+    /// Hard-reset confirm armed (second click executes).
+    pub reset_hard_armed: bool,
+    /// A hard-reset kicked off from this drawer is still running.
+    pub reset_hard_busy: bool,
     /// An "Open PR" flow kicked off from this drawer is still running.
     pub pr_busy: bool,
     /// The PR created from this drawer, for the "View PR" affordance.
@@ -510,6 +514,15 @@ fn full_commit_message(subject: &str, body: &str) -> String {
 /// Commit the index as-is with `message`, toast the outcome, then refresh the
 /// file lists + diff. The commit also trips the watcher, refreshing the card.
 fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp>) {
+    commit_with(repo, message, false, cx);
+}
+
+/// Stage any remaining unstaged changes, then commit — Cursor/PyCharm style.
+fn commit_all_changes(repo: SharedString, message: String, cx: &mut Context<OrreryApp>) {
+    commit_with(repo, message, true, cx);
+}
+
+fn commit_with(repo: SharedString, message: String, stage_all: bool, cx: &mut Context<OrreryApp>) {
     let id = repo.to_string();
     // The commit subject, for the success toast's detail line.
     let subject = message.lines().next().unwrap_or("").trim().to_string();
@@ -517,7 +530,11 @@ fn commit_staged(repo: SharedString, message: String, cx: &mut Context<OrreryApp
         let (result, list) = cx
             .background_executor()
             .spawn(async move {
-                let result = git_ops::commit(&id, message.trim());
+                let result = if stage_all {
+                    git_ops::commit_all(&id, message.trim())
+                } else {
+                    git_ops::commit(&id, message.trim())
+                };
                 (result, git_ops::changes(&id).unwrap_or_default())
             })
             .await;
@@ -990,9 +1007,10 @@ fn tab_bar(
                                 this.drawer.pr = PrState::Error("PR triage is GitHub-only.".into());
                             }
                         }
-                    } else if tab == DrawerTab::Changes
-                        && matches!(this.drawer.diff, DiffState::Idle)
-                    {
+                    } else if tab == DrawerTab::Changes {
+                        // Always re-read status when entering Changes so nested
+                        // deletions/edits that landed while another tab was open
+                        // (or before a watcher rescan) still appear.
                         this.drawer.diff = DiffState::Loading;
                         if this.drawer.commit_input.is_none() {
                             this.drawer.commit_input = Some(cx.new(|cx| {
@@ -1509,13 +1527,21 @@ fn changes_view(
         .changes
         .as_ref()
         .is_some_and(|list| list.iter().any(|c| c.staged));
+    let has_unstaged = data
+        .changes
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|c| !c.staged));
+    let has_changes = has_staged || has_unstaged;
+    // Cursor/PyCharm: when anything is still unstaged, the primary action
+    // stages it then commits ("Commit All"). Pure staged → plain "Commit".
+    let commit_all = has_unstaged;
 
     // Commit composer (the fields exist once the tab has been opened): a
     // single-line subject + an optional multi-line body, joined by a blank
     // line into the commit message.
     if let (Some(input), Some(body_input)) = (&data.commit_input, &data.commit_body_input) {
         let mut actions = div().flex().flex_row().items_center().gap(px(6.));
-        // AI: suggest a commit message for the staged diff (gated on aiReady).
+        // AI: suggest a commit message from the working-tree diff (gated on aiReady).
         if ai_ready {
             let app3 = app.clone();
             actions = actions.child(pr_btn(
@@ -1528,14 +1554,16 @@ fn changes_view(
             ));
         }
         actions = actions.child(div().flex_1());
-        if has_staged {
+        if has_changes {
             let repo = row.id.clone();
             let app2 = app.clone();
             let input2 = input.clone();
             let body2 = body_input.clone();
+            let stage_all = commit_all;
+            let label = if commit_all { "Commit All" } else { "Commit" };
             actions = actions.child(pr_btn(
                 SharedString::from("commit"),
-                "Commit",
+                label,
                 t,
                 move |cx: &mut gpui::App| {
                     let repo = repo.clone();
@@ -1544,19 +1572,24 @@ fn changes_view(
                         return;
                     }
                     let msg = full_commit_message(&subject, &body2.read(cx).value());
-                    app2.update(cx, |_this, cx| commit_staged(repo, msg, cx));
+                    app2.update(cx, |_this, cx| {
+                        if stage_all {
+                            commit_all_changes(repo, msg, cx);
+                        } else {
+                            commit_staged(repo, msg, cx);
+                        }
+                    });
                 },
             ));
         } else {
-            // Nothing in the index — commit would be a no-op, so say why (once
-            // the lists have actually loaded) instead of offering a live button.
+            // Working tree clean — say why (once lists have loaded).
             if data.changes.is_some() {
                 actions = actions.child(
                     div()
                         .font_family(MONO)
                         .text_size(px(t.text_data_sm))
                         .text_color(rgb(t.fg3))
-                        .child(SharedString::from("Nothing staged")),
+                        .child(SharedString::from("Nothing to commit")),
                 );
             }
             actions = actions.child(disabled_btn("Commit", t));
@@ -1568,8 +1601,9 @@ fn changes_view(
     }
 
     // The AI commit-message suggestion (subject + optional body), with a
-    // one-click commit using both.
+    // one-click Commit All using both (stages remaining changes first).
     if let Some((subject, body)) = &data.commit_suggestion {
+        let generating = subject.as_ref() == "Generating…";
         let repo = row.id.clone();
         let app4 = app.clone();
         let (subject2, body2) = (subject.clone(), body.clone());
@@ -1595,10 +1629,14 @@ fn changes_view(
                     )),
             );
         }
-        col = col.child(
-            card.child(div().flex().flex_row().justify_end().child(pr_btn(
+        if !generating {
+            card = card.child(div().flex().flex_row().justify_end().child(pr_btn(
                 SharedString::from("commit-ai"),
-                "Commit this",
+                if commit_all || !has_staged {
+                    "Commit All"
+                } else {
+                    "Commit this"
+                },
                 t,
                 move |cx: &mut gpui::App| {
                     let repo = repo.clone();
@@ -1606,27 +1644,36 @@ fn changes_view(
                         return;
                     }
                     let msg = full_commit_message(&subject2, &body2);
-                    app4.update(cx, |_this, cx| commit_staged(repo, msg, cx));
+                    // Always stage-all first so Generate → Commit works without
+                    // a separate Stage all click (Cursor/PyCharm flow).
+                    app4.update(cx, |_this, cx| commit_all_changes(repo, msg, cx));
                 },
-            ))),
-        );
+            )));
+        }
+        col = col.child(card);
     }
 
-    // Push / Open PR — the last mile after committing. Push shows when there's
+    // Push / Open PR / Reset hard — the last mile after committing. Push shows when there's
     // something to push (ahead, or a commit made in this drawer session while
     // the row's ahead count may be stale). Open PR shows only when it can work:
     // a GitHub remote, a GitHub token, a known default branch, and the current
     // branch isn't it — hidden otherwise, never broken (the aiReady philosophy;
     // only the AI *drafting* inside the flow is gated on aiReady).
     let show_push = row.ahead > 0 || data.committed;
+    let show_reset = !row.branch.is_empty();
     let show_pr = github_authed
         && github_slug(row).is_some()
         && data
             .default_branch
             .as_ref()
             .is_some_and(|d| *d != row.branch);
-    if show_push || show_pr || data.pr_url.is_some() {
-        let mut sync = div().flex().flex_row().items_center().gap(px(6.));
+    if show_push || show_pr || show_reset || data.pr_url.is_some() {
+        let mut sync = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.))
+            .flex_wrap();
         if show_push {
             if data.push_busy {
                 sync = sync.child(disabled_btn("Pushing…", t));
@@ -1638,6 +1685,26 @@ fn changes_view(
                     t,
                     move |cx: &mut gpui::App| {
                         app6.update(cx, |this, cx| this.drawer_push(cx));
+                    },
+                ));
+            }
+        }
+        if show_reset {
+            if data.reset_hard_busy {
+                sync = sync.child(disabled_btn("Resetting…", t));
+            } else {
+                let app_r = app.clone();
+                let label = if data.reset_hard_armed {
+                    format!("Confirm reset --hard origin/{}", row.branch)
+                } else {
+                    format!("Reset hard origin/{}", row.branch)
+                };
+                sync = sync.child(pr_btn(
+                    SharedString::from("reset-hard"),
+                    &label,
+                    t,
+                    move |cx: &mut gpui::App| {
+                        app_r.update(cx, |this, cx| this.drawer_reset_hard(cx));
                     },
                 ));
             }

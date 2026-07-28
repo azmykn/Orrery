@@ -39,6 +39,8 @@ const LUCIDE_ICONS = [
   "binary", "hash", "braces", "type", "user", "rocket", "bell",
   // layout toggle + compact list launcher
   "list", "code",
+  // sidebar collapse / expand
+  "panel-left-close", "panel-left-open",
 ];
 
 // Language marks: multicolor devicon "-original" SVGs, rendered in full color

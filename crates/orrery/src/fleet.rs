@@ -61,6 +61,9 @@ pub enum FleetOp {
     /// Only ever started through the confirm strip
     /// ([`OrreryApp::confirm_fleet_prune`]) — never directly from a button.
     Prune,
+    /// Only ever started through the confirm strip
+    /// ([`OrreryApp::confirm_fleet_reset`]) — `git reset --hard @{upstream}`.
+    ResetHard,
 }
 
 impl FleetOp {
@@ -70,6 +73,7 @@ impl FleetOp {
             FleetOp::Fetch => "Fetching",
             FleetOp::Pull => "Pulling",
             FleetOp::Prune => "Pruning",
+            FleetOp::ResetHard => "Resetting",
         }
     }
 
@@ -79,6 +83,7 @@ impl FleetOp {
             FleetOp::Fetch => "Fetch",
             FleetOp::Pull => "Pull",
             FleetOp::Prune => "Prune",
+            FleetOp::ResetHard => "Reset hard",
         }
     }
 }
@@ -122,8 +127,9 @@ pub struct FleetRun {
 impl OrreryApp {
     /// Toggle a repo in/out of the multi-selection (card checkbox, Ctrl+click).
     pub fn toggle_selected(&mut self, id: SharedString, cx: &mut Context<Self>) {
-        // Editing the selection invalidates a pending prune confirm.
+        // Editing the selection invalidates a pending prune/reset confirm.
         self.fleet_prune = None;
+        self.fleet_reset = None;
         if !self.selected.remove(&id) {
             self.selected.insert(id);
         }
@@ -132,9 +138,10 @@ impl OrreryApp {
 
     /// Clear the multi-selection (fleet bar "Clear", or Esc with no overlay).
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
-        if !self.selected.is_empty() || self.fleet_prune.is_some() {
+        if !self.selected.is_empty() || self.fleet_prune.is_some() || self.fleet_reset.is_some() {
             self.selected.clear();
             self.fleet_prune = None;
+            self.fleet_reset = None;
             cx.notify();
         }
     }
@@ -144,6 +151,7 @@ impl OrreryApp {
     /// so a hand-picked repo outside the filter isn't dropped.
     pub fn select_all_visible(&mut self, cx: &mut Context<Self>) {
         self.fleet_prune = None;
+        self.fleet_reset = None;
         for i in self.visible_rows() {
             let id = self.rows[i].id.clone();
             self.selected.insert(id);
@@ -177,6 +185,7 @@ impl OrreryApp {
             return;
         }
         self.fleet_prune = None;
+        self.fleet_reset = None;
         self.selected = matched;
         cx.notify();
     }
@@ -223,8 +232,9 @@ impl OrreryApp {
         if self.fleet_run.is_some() || repos.is_empty() {
             return;
         }
-        // Starting any run invalidates a pending prune confirm.
+        // Starting any run invalidates a pending prune/reset confirm.
         self.fleet_prune = None;
+        self.fleet_reset = None;
         let total = repos.len();
         self.fleet_seq += 1;
         let run_id = self.fleet_seq;
@@ -298,6 +308,9 @@ impl OrreryApp {
                         FleetOp::Prune => {
                             fleet::run(&repos, workers, &cancel, progress, fleet::prune_op())
                         }
+                        FleetOp::ResetHard => {
+                            fleet::run(&repos, workers, &cancel, progress, fleet::reset_hard_op())
+                        }
                     }
                 })
                 .await;
@@ -319,7 +332,7 @@ impl OrreryApp {
     /// expand the bar into the confirm strip with the per-repo breakdown.
     /// Nothing is deleted here — only [`Self::confirm_fleet_prune`] executes.
     pub fn start_fleet_prune(&mut self, cx: &mut Context<Self>) {
-        if self.fleet_run.is_some() || self.fleet_prune.is_some() {
+        if self.fleet_run.is_some() || self.fleet_prune.is_some() || self.fleet_reset.is_some() {
             return;
         }
         // Grid order, so the breakdown reads like the grid.
@@ -409,6 +422,40 @@ impl OrreryApp {
         }
     }
 
+    /// Arm a hard-reset confirm for the current selection (`git reset --hard
+    /// @{upstream}` per repo). Nothing is reset until [`Self::confirm_fleet_reset`].
+    pub fn start_fleet_reset(&mut self, cx: &mut Context<Self>) {
+        if self.fleet_run.is_some() || self.fleet_reset.is_some() || self.fleet_prune.is_some() {
+            return;
+        }
+        let repos: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| self.selected.contains(&r.id))
+            .map(|r| r.id.to_string())
+            .collect();
+        if repos.is_empty() {
+            return;
+        }
+        self.fleet_reset = Some(repos);
+        cx.notify();
+    }
+
+    /// Execute the armed hard reset across the planned repos.
+    pub fn confirm_fleet_reset(&mut self, cx: &mut Context<Self>) {
+        let Some(repos) = self.fleet_reset.take() else {
+            return;
+        };
+        self.run_fleet_repos(FleetOp::ResetHard, repos, cx);
+    }
+
+    /// Dismiss a pending hard-reset confirm without running it.
+    pub fn cancel_fleet_reset(&mut self, cx: &mut Context<Self>) {
+        if self.fleet_reset.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Bulk "Open in IDE": launch the configured editor on every selected
     /// repo (the card's launch path). Selections over [`MAX_BULK_LAUNCH`] are
     /// refused with a toast asking to narrow — spawning dozens of editor
@@ -477,7 +524,8 @@ impl OrreryApp {
         if self.selected.is_empty() && self.fleet_run.is_none() {
             return None;
         }
-        let idle = self.fleet_run.is_none() && self.fleet_prune.is_none();
+        let idle =
+            self.fleet_run.is_none() && self.fleet_prune.is_none() && self.fleet_reset.is_none();
         let mut bar = div()
             .flex()
             .flex_row()
@@ -562,6 +610,15 @@ impl OrreryApp {
                 cx.listener(|this, _e, _w, cx| this.start_fleet_prune(cx)),
             ))
             .child(bar_btn(
+                "fleet-reset-hard",
+                "history",
+                "Reset hard",
+                idle,
+                true,
+                t,
+                cx.listener(|this, _e, _w, cx| this.start_fleet_reset(cx)),
+            ))
+            .child(bar_btn(
                 "fleet-launch",
                 "code",
                 "Open in IDE",
@@ -579,6 +636,55 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _e, _w, cx| this.clear_selection(cx)),
             ));
+        // A pending reset confirm expands the bar into a danger strip.
+        if let Some(repos) = &self.fleet_reset {
+            let n = repos.len();
+            let strip = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.))
+                .px(px(16.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(rgb(t.behind))
+                .bg(rgb(t.danger_badge))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(t.text_small))
+                        .text_color(rgb(t.fg0))
+                        .child(SharedString::from(format!(
+                            "Reset {n} repo(s) to origin/<branch>? Discards local commits and uncommitted changes."
+                        ))),
+                )
+                .child(bar_btn(
+                    "fleet-reset-confirm",
+                    "history",
+                    "Confirm reset",
+                    true,
+                    true,
+                    t,
+                    cx.listener(|this, _e, _w, cx| this.confirm_fleet_reset(cx)),
+                ))
+                .child(bar_btn(
+                    "fleet-reset-cancel",
+                    "x",
+                    "Cancel",
+                    true,
+                    false,
+                    t,
+                    cx.listener(|this, _e, _w, cx| this.cancel_fleet_reset(cx)),
+                ));
+            return Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(strip)
+                    .child(bar)
+                    .into_any_element(),
+            );
+        }
         // A pending prune confirm expands the bar into a strip above the
         // buttons row, showing the per-repo breakdown and Confirm/Cancel.
         let Some(plan) = &self.fleet_prune else {

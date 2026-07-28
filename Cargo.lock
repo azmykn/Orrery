@@ -4653,6 +4653,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
+ "image",
  "orrery-core",
  "orrery-platform",
  "regex",

@@ -185,14 +185,27 @@ Summary:",
     )
 }
 
+/// Heuristic: models known to "think" into a hidden channel and often empty
+/// `response` when `num_predict` is small (Orrery's default chat budget).
+fn likely_thinking_model(model: &str) -> bool {
+    let n = model.to_lowercase();
+    n.starts_with("qwen3")
+        || n.contains("qwen3:")
+        || n.starts_with("gemma3")
+        || n.contains("gemma3:")
+}
+
 /// Generate a summary via Ollama.
 ///
-/// Tries normally first. If the model returns an empty response — the signature
-/// of a "thinking" model (qwen3, gemma3, …) that spent its whole token budget
-/// on hidden reasoning — it retries once with `think:false`. This way the
-/// `think` field is only ever sent to a model that actually needs it, so plain
-/// models that might reject the field are never hit with it.
+/// Known thinking models (qwen3, gemma3, …) get `think:false` on the first
+/// attempt so short prompts (commit messages, summaries) don't burn the whole
+/// token budget on hidden reasoning. Other models try without the field first;
+/// if the response is empty, we retry once with `think:false` — that way plain
+/// models that might reject the field are never hit with it unnecessarily.
 async fn ollama_generate(model: &str, prompt: &str) -> Result<String, String> {
+    if likely_thinking_model(model) {
+        return generate_once(model, prompt, true).await;
+    }
     let first = generate_once(model, prompt, false).await?;
     if !first.is_empty() {
         return Ok(first);
@@ -488,6 +501,7 @@ mod tests {
                 ahead: 2,
                 behind: 0,
                 dirty: 7,
+                ..Default::default()
             },
             last_commit_unix: 0,
             activity: Activity::Active,
@@ -501,6 +515,8 @@ mod tests {
             private: false,
             favorite: false,
             ai_summary: None,
+            parent_id: None,
+            submodule_path: None,
         }
     }
 
@@ -514,6 +530,14 @@ mod tests {
         // preferred absent → smallest
         assert_eq!(pick_model("missing", &avail).as_deref(), Some("small:1b"));
         assert_eq!(pick_model("x", &[]), None);
+    }
+
+    #[test]
+    fn likely_thinking_model_matches_qwen3_and_gemma3() {
+        assert!(likely_thinking_model("qwen3:0.6b"));
+        assert!(likely_thinking_model("gemma3:1b"));
+        assert!(!likely_thinking_model("qwen2.5:1.5b"));
+        assert!(!likely_thinking_model("llama3.2:1b"));
     }
 
     #[test]

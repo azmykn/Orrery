@@ -1,0 +1,21 @@
+Orrery
+======
+
+This product includes software developed by Seb Burrell (the original Orrery
+project), licensed under the MIT License. See the LICENSE file.
+
+Copyright (c) 2026 Seb Burrell
+
+------------------------------------------------------------------------
+
+Fork modifications
+------------------
+
+This repository also includes modifications, UI enhancements, and DigitsCode-
+oriented integrations developed by DigitsCode (Azmy).
+
+Copyright (c) 2026 DigitsCode
+
+These modifications are distributed under the same MIT License terms as the
+original software. The original copyright notice and permission notice are
+preserved as required by the MIT License.

@@ -117,8 +117,9 @@ pub(crate) fn ahead_behind(repo: &Repository) -> Option<(u32, u32)> {
     Some((a as u32, b as u32))
 }
 
-/// Branch + ahead/behind + dirty count for a repo. The canonical git-status
-/// reader, shared by `scan` (grid snapshot) and the drawer's refresh ops.
+/// Branch + ahead/behind + dirty/staged/unstaged counts for a repo. The
+/// canonical git-status reader, shared by `scan` (grid snapshot) and the
+/// drawer's refresh ops.
 pub(crate) fn status_of(repo: &Repository) -> GitStatus {
     let branch = repo
         .head()
@@ -130,15 +131,41 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
     opts.include_untracked(true)
         .recurse_untracked_dirs(false)
         .include_ignored(false);
-    let dirty = repo
-        .statuses(Some(&mut opts))
-        .map(|s| s.iter().filter(|e| !e.status().is_ignored()).count() as u32)
-        .unwrap_or(0);
+    let mut dirty = 0u32;
+    let mut staged = 0u32;
+    let mut unstaged = 0u32;
+    if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
+        for e in statuses.iter() {
+            let s = e.status();
+            if s.is_ignored() {
+                continue;
+            }
+            dirty += 1;
+            let index_change = s.is_index_new()
+                || s.is_index_modified()
+                || s.is_index_deleted()
+                || s.is_index_renamed()
+                || s.is_index_typechange();
+            let wt_change = s.is_wt_new()
+                || s.is_wt_modified()
+                || s.is_wt_deleted()
+                || s.is_wt_renamed()
+                || s.is_wt_typechange();
+            if index_change {
+                staged += 1;
+            }
+            if wt_change {
+                unstaged += 1;
+            }
+        }
+    }
     GitStatus {
         branch,
         ahead,
         behind,
         dirty,
+        staged,
+        unstaged,
     }
 }
 
@@ -310,6 +337,64 @@ pub fn pull(path: &str) -> Result<OpOutcome, String> {
     repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
         .map_err(|e| e.to_string())?;
     Ok(OpOutcome::Done(format!("fast-forwarded {behind}")))
+}
+
+/// `git fetch` + `git reset --hard @{upstream}`: move the current branch to its
+/// tracked remote tip (typically `origin/<branch>`), discarding local commits
+/// and uncommitted changes. Skips detached HEAD / missing upstream.
+pub fn reset_hard_upstream(path: &str) -> Result<OpOutcome, String> {
+    let repo = Repository::open(path).map_err(|e| e.to_string())?;
+    if let Ok(mut remote) = repo.find_remote("origin") {
+        let mut opts = FetchOptions::new();
+        opts.remote_callbacks(remote_callbacks());
+        let refspecs: Vec<String> = remote
+            .fetch_refspecs()
+            .map(|r| r.iter().flatten().map(String::from).collect())
+            .unwrap_or_default();
+        remote
+            .fetch(&refspecs, Some(&mut opts), None)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let head = repo.head().map_err(|e| e.to_string())?;
+    if !head.is_branch() {
+        return Ok(OpOutcome::Skipped("detached HEAD".into()));
+    }
+    let Some(branch) = head.shorthand().map(String::from) else {
+        return Ok(OpOutcome::Skipped("unborn branch".into()));
+    };
+    let Some(local_oid) = head.target() else {
+        return Ok(OpOutcome::Skipped("unborn branch".into()));
+    };
+    let upstream = match repo
+        .find_branch(&branch, BranchType::Local)
+        .ok()
+        .and_then(|b| b.upstream().ok())
+    {
+        Some(u) => u,
+        None => return Ok(OpOutcome::Skipped("no upstream".into())),
+    };
+    let Some(up_oid) = upstream.get().target() else {
+        return Ok(OpOutcome::Skipped("no upstream".into()));
+    };
+    let up_name = upstream
+        .get()
+        .shorthand()
+        .map(String::from)
+        .unwrap_or_else(|| format!("origin/{branch}"));
+
+    if up_oid == local_oid && status_of(&repo).dirty == 0 {
+        return Ok(OpOutcome::Done(format!("already at {up_name}")));
+    }
+
+    let object = repo.find_object(up_oid, None).map_err(|e| e.to_string())?;
+    repo.reset(
+        &object,
+        git2::ResetType::Hard,
+        Some(git2::build::CheckoutBuilder::new().force()),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(OpOutcome::Done(format!("reset --hard {up_name}")))
 }
 
 /// Stash uncommitted changes (including untracked). A clean tree is a skip.
@@ -918,9 +1003,28 @@ fn apply_file_hunk(path: &str, file: &str, hunk_ix: usize, stage: bool) -> Resul
         .map_err(|e| e.to_string())
 }
 
+/// Path for a status entry. Prefer the UTF-8 [`StatusEntry::path`]; fall back
+/// to lossy bytes. Empty paths are skipped by the caller — libgit2 can yield
+/// them for some rename edge cases.
+fn status_path(entry: &git2::StatusEntry<'_>) -> String {
+    entry
+        .path()
+        .map(str::to_owned)
+        .unwrap_or_else(|| String::from_utf8_lossy(entry.path_bytes()).into_owned())
+}
+
 /// Every pending change in the repo, split per file into staged (index vs
 /// HEAD) and unstaged (working tree vs index) entries — the model behind a
 /// per-file staging checklist. Ordered as libgit2 reports them (by path).
+///
+/// Workdir rename detection is intentionally **off**: an unstaged
+/// delete+add of similar content would otherwise collapse into a single
+/// `Renamed` row whose path is only the old name. Staging that path then
+/// records only the deletion and leaves the new file untracked — so deleted
+/// (and renamed) files looked "invisible" to a complete commit. With detection
+/// off, those show as `Deleted` + `Untracked` and both stage cleanly. Staged
+/// renames (`git mv` already in the index) still surface via
+/// `renames_head_to_index`.
 pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
     let repo = Repository::open(path).map_err(|e| e.to_string())?;
     let mut opts = git2::StatusOptions::new();
@@ -928,13 +1032,16 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
         .recurse_untracked_dirs(true)
         .include_ignored(false)
         .renames_head_to_index(true)
-        .renames_index_to_workdir(true);
+        .renames_index_to_workdir(false);
     let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.to_string())?;
 
     let mut out = Vec::new();
     for entry in statuses.iter() {
         let s = entry.status();
-        let file = String::from_utf8_lossy(entry.path_bytes()).into_owned();
+        let file = status_path(&entry);
+        if file.is_empty() {
+            continue;
+        }
         // A single status entry carries both index and worktree bits; the
         // rename checks come first because RENAMED can combine with MODIFIED.
         let staged_kind = if s.is_index_renamed() {
@@ -944,6 +1051,9 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
         } else if s.is_index_deleted() {
             Some(ChangeKind::Deleted)
         } else if s.is_index_modified() || s.is_index_typechange() {
+            Some(ChangeKind::Modified)
+        } else if s.is_conflicted() {
+            // Unmatched conflict entries still need a visible row.
             Some(ChangeKind::Modified)
         } else {
             None
@@ -975,6 +1085,24 @@ pub fn changes(path: &str) -> Result<Vec<FileChange>, String> {
         }
     }
     Ok(out)
+}
+
+/// Stage every unstaged / untracked / deleted path (`git add -A` semantics
+/// for pending changes). No-op when the working tree has nothing to stage.
+pub fn stage_all(path: &str) -> Result<u32, String> {
+    let pending = changes(path)?;
+    let mut to_stage: Vec<String> = pending
+        .into_iter()
+        .filter(|c| !c.staged)
+        .map(|c| c.path)
+        .collect();
+    to_stage.sort();
+    to_stage.dedup();
+    let n = to_stage.len() as u32;
+    if n > 0 {
+        stage_paths(path, &to_stage)?;
+    }
+    Ok(n)
 }
 
 /// Stage specific files into the index (`git add <paths>`). Paths are
@@ -1041,6 +1169,23 @@ pub fn commit(path: &str, message: &str) -> Result<String, String> {
         .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
         .map_err(|e| e.to_string())?;
     Ok(oid.to_string()[..7.min(oid.to_string().len())].to_string())
+}
+
+/// Stage every unstaged/untracked/deleted path, then commit — the Cursor /
+/// PyCharm "Commit All" flow so the user doesn't need a separate `git add`.
+pub fn commit_all(path: &str, message: &str) -> Result<String, String> {
+    let pending = changes(path)?;
+    let mut to_stage: Vec<String> = pending
+        .into_iter()
+        .filter(|c| !c.staged)
+        .map(|c| c.path)
+        .collect();
+    to_stage.sort();
+    to_stage.dedup();
+    if !to_stage.is_empty() {
+        stage_paths(path, &to_stage)?;
+    }
+    commit(path, message)
 }
 
 /// Push the current branch to its upstream remote; with no upstream, push to
@@ -1433,6 +1578,42 @@ mod tests {
         let repo = Repository::open(&path).unwrap();
         let tree = repo.head().unwrap().peel_to_tree().unwrap();
         assert!(tree.get_name("README.md").is_none(), "gone from HEAD tree");
+    }
+
+    #[test]
+    fn nested_deletion_lists_as_deleted_not_rename() {
+        let (dir, path) = init_repo();
+        let nested = dir.path().join("src").join("mod");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("a.rs"), "fn a() {}").unwrap();
+        stage_paths(&path, &["src/mod/a.rs".into()]).unwrap();
+        commit(&path, "add nested").unwrap();
+
+        fs::remove_file(nested.join("a.rs")).unwrap();
+        // Similar untracked content nearby must NOT collapse the deletion into
+        // a single Renamed row (that hid the delete from Commit All).
+        fs::write(dir.path().join("src").join("b.rs"), "fn a() {}").unwrap();
+
+        let got = change_tuples(&path);
+        assert!(
+            got.contains(&("src/mod/a.rs".into(), ChangeKind::Deleted, false)),
+            "deletion must stay visible: {got:?}"
+        );
+        assert!(
+            got.contains(&("src/b.rs".into(), ChangeKind::Untracked, false)),
+            "new file must stay visible: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|(_, k, _)| *k == ChangeKind::Renamed),
+            "workdir rename detection is off: {got:?}"
+        );
+
+        commit_all(&path, "remove nested, keep sibling").unwrap();
+        assert!(change_tuples(&path).is_empty());
+        let repo = Repository::open(&path).unwrap();
+        let tree = repo.head().unwrap().peel_to_tree().unwrap();
+        assert!(tree.get_path(std::path::Path::new("src/mod/a.rs")).is_err());
+        assert!(tree.get_path(std::path::Path::new("src/b.rs")).is_ok());
     }
 
     #[test]

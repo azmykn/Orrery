@@ -398,6 +398,7 @@ mod tests {
                 ahead: 0,
                 behind: 0,
                 dirty: 0,
+                ..Default::default()
             },
             last_commit_unix: 0,
             activity: Activity::Active,
@@ -411,6 +412,8 @@ mod tests {
             private: false,
             favorite: false,
             ai_summary: None,
+            parent_id: None,
+            submodule_path: None,
         }
     }
 

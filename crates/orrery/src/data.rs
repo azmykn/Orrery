@@ -1,6 +1,7 @@
 //! Bridge from `orrery-core` (`cache` / `model`) to a flat, render-ready `Row`.
 //! The card reads `Row` and never touches the core's serde types directly.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,6 +26,8 @@ pub struct Row {
     pub ahead: u32,
     pub behind: u32,
     pub dirty: u32,
+    pub staged: u32,
+    pub unstaged: u32,
     pub stars: SharedString, // pre-formatted (e.g. "1.2k")
     pub host: SharedString,  // "github" / "gitlab" / "" (brand-icon name)
     pub private: bool,
@@ -33,6 +36,12 @@ pub struct Row {
     pub activity: model::Activity,
     /// Last-commit time (Unix secs) — sort key for the "Activity" sort.
     pub last_commit_unix: i64,
+    /// Parent repo id when this row is a checked-out git submodule.
+    pub parent_id: Option<SharedString>,
+    /// Relative submodule path from `.gitmodules`, if any.
+    pub submodule_path: Option<SharedString>,
+    /// Number of discovered submodule children (parents only).
+    pub child_count: u32,
 }
 
 pub(crate) fn rel_age(last_commit_unix: i64, now: i64) -> String {
@@ -238,44 +247,58 @@ pub(crate) fn unwrap_soft_breaks(src: &str) -> String {
 }
 
 pub fn to_rows(repos: Vec<model::Repo>, now: i64) -> Vec<Row> {
+    let mut child_counts: HashMap<&str, u32> = HashMap::new();
+    for r in &repos {
+        if let Some(p) = r.parent_id.as_deref() {
+            *child_counts.entry(p).or_default() += 1;
+        }
+    }
     repos
         .into_iter()
-        .map(|r| Row {
-            id: r.id.into(),
-            url: match (r.remote_host.as_deref(), r.slug.as_deref()) {
-                (Some(host), Some(slug)) => format!("https://{host}/{slug}"),
-                _ => String::new(),
+        .map(|r| {
+            let child_count = child_counts.get(r.id.as_str()).copied().unwrap_or(0);
+            Row {
+                id: r.id.into(),
+                url: match (r.remote_host.as_deref(), r.slug.as_deref()) {
+                    (Some(host), Some(slug)) => format!("https://{host}/{slug}"),
+                    _ => String::new(),
+                }
+                .into(),
+                name: oneline(r.display_name).into(),
+                slug: r.slug.unwrap_or_else(|| "no remote".into()).into(),
+                root: r.root.into(),
+                path: r.path.into(),
+                description: oneline(
+                    r.description
+                        .filter(|d| !d.trim().is_empty())
+                        .unwrap_or_else(|| "No README description.".into()),
+                )
+                .into(),
+                language: r.language.unwrap_or_default().into(),
+                branch: r.git.branch.into(),
+                age: rel_age(r.last_commit_unix, now).into(),
+                release: oneline(r.latest_release.unwrap_or_default()).into(),
+                ai_summary: oneline(r.ai_summary.unwrap_or_default()).into(),
+                ahead: r.git.ahead,
+                behind: r.git.behind,
+                dirty: r.git.dirty,
+                staged: r.git.staged,
+                unstaged: r.git.unstaged,
+                stars: fmt_stars(r.stars).into(),
+                host: match r.host {
+                    Some(model::Host::Github) => "github",
+                    Some(model::Host::Gitlab) => "gitlab",
+                    None => "",
+                }
+                .into(),
+                private: r.private,
+                favorite: r.favorite,
+                activity: r.activity,
+                last_commit_unix: r.last_commit_unix,
+                parent_id: r.parent_id.map(SharedString::from),
+                submodule_path: r.submodule_path.map(SharedString::from),
+                child_count,
             }
-            .into(),
-            name: oneline(r.display_name).into(),
-            slug: r.slug.unwrap_or_else(|| "no remote".into()).into(),
-            root: r.root.into(),
-            path: r.path.into(),
-            description: oneline(
-                r.description
-                    .filter(|d| !d.trim().is_empty())
-                    .unwrap_or_else(|| "No README description.".into()),
-            )
-            .into(),
-            language: r.language.unwrap_or_default().into(),
-            branch: r.git.branch.into(),
-            age: rel_age(r.last_commit_unix, now).into(),
-            release: oneline(r.latest_release.unwrap_or_default()).into(),
-            ai_summary: oneline(r.ai_summary.unwrap_or_default()).into(),
-            ahead: r.git.ahead,
-            behind: r.git.behind,
-            dirty: r.git.dirty,
-            stars: fmt_stars(r.stars).into(),
-            host: match r.host {
-                Some(model::Host::Github) => "github",
-                Some(model::Host::Gitlab) => "gitlab",
-                None => "",
-            }
-            .into(),
-            private: r.private,
-            favorite: r.favorite,
-            activity: r.activity,
-            last_commit_unix: r.last_commit_unix,
         })
         .collect()
 }

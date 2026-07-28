@@ -3,10 +3,13 @@ Type=Application
 Name=Orrery
 GenericName=Repo Dashboard
 Comment=every repo in orbit — a Linux-native command center for your git repos
+# Exec is rewritten by scripts/install-desktop.sh for local/dev installs.
 Exec=orrery
 Icon=orrery
 Terminal=false
 Categories=Development;RevisionControl;
-Keywords=git;repos;dashboard;developer;
+Keywords=git;repos;dashboard;developer;orrery;
 StartupNotify=true
-StartupWMClass=Orrery
+# Must match WindowOptions.app_id so the shell can pin / show the right icon.
+StartupWMClass=com.orrery.app
+X-GNOME-UsesNotifications=true

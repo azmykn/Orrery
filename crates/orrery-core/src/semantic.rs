@@ -1000,6 +1000,8 @@ mod tests {
             private: false,
             favorite: false,
             ai_summary: None,
+            parent_id: None,
+            submodule_path: None,
         };
         assert_eq!(
             repo_key(&repo),

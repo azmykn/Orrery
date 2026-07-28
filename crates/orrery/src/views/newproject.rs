@@ -1,7 +1,8 @@
-//! New-project dialog — the header "+" action. A centered modal to either clone
-//! a remote repository or initialise a fresh one into a chosen workspace root.
-//! On success it rescans so the new repo appears in the grid. Sync git
-//! (clone/init) runs off the UI thread.
+//! Add dialog — the header "+" action. A centered modal to add a local path
+//! (single git repo or folder of repos), clone a remote (GitHub/GitLab), or
+//! initialise a fresh repo into a chosen workspace root. On success it rescans
+//! so the new path or repo appears in the grid. Sync git (clone/init) runs off
+//! the UI thread.
 
 use gpui::{
     Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -14,12 +15,16 @@ use crate::theme::Theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NewMode {
+    /// Append a directory to `config.roots` and rescan.
+    AddRoot,
+    /// `git clone` into an existing root.
     Clone,
+    /// `git init` (+ optional template) into an existing root.
     Create,
 }
 
-/// State for the new-project dialog: the two text fields, the chosen mode and
-/// destination root, plus a status line for validation / progress.
+/// State for the add dialog: the text fields, the chosen mode and destination
+/// root, plus a status line for validation / progress.
 pub struct NewProjectData {
     pub mode: NewMode,
     pub url: Entity<InputState>,
@@ -28,9 +33,11 @@ pub struct NewProjectData {
     pub remote: Entity<InputState>,
     /// Create-mode: optional template directory to copy in.
     pub template: Entity<InputState>,
+    /// AddRoot-mode: absolute or `~/…` path (single repo or folder of repos).
+    pub root_path: Entity<InputState>,
     /// Create-mode: whether to make an initial commit (vs an empty repo).
     pub first_commit: bool,
-    /// Index into `config.roots` — the destination root.
+    /// Index into `config.roots` — the destination root (Clone/Create).
     pub root: usize,
     pub status: SharedString,
     pub busy: bool,
@@ -61,60 +68,77 @@ pub fn render(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(t.text_h3))
                 .text_color(rgb(t.fg0))
-                .child("New project"),
+                .child("Add"),
         )
-        // Mode tabs.
+        // Mode tabs: local path | GitHub clone | blank repo.
         .child(
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .gap(px(8.))
-                .child(mode_tab("Clone repository", NewMode::Clone, d.mode, t, app))
+                .child(mode_tab("Local path", NewMode::AddRoot, d.mode, t, app))
+                .child(mode_tab("From GitHub", NewMode::Clone, d.mode, t, app))
                 .child(mode_tab("New repository", NewMode::Create, d.mode, t, app)),
         );
 
-    if d.mode == NewMode::Clone {
-        panel = panel.child(field("Repository URL", &d.url, t));
-    }
-    panel = panel.child(field("Folder name", &d.name, t));
-    if d.mode == NewMode::Create {
-        panel = panel
-            .child(field("Remote URL (optional)", &d.remote, t))
-            .child(field("Template directory (optional)", &d.template, t))
-            .child(first_commit_toggle(d.first_commit, t, app));
+    match d.mode {
+        NewMode::AddRoot => {
+            panel = panel
+                .child(field("Local path", &d.root_path, t))
+                .child(
+                    div()
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg3))
+                        .child("A single git repo or a folder of repos."),
+                );
+        }
+        NewMode::Clone => {
+            panel = panel.child(field("Repository URL", &d.url, t));
+            panel = panel.child(field("Folder name", &d.name, t));
+        }
+        NewMode::Create => {
+            panel = panel
+                .child(field("Folder name", &d.name, t))
+                .child(field("Remote URL (optional)", &d.remote, t))
+                .child(field("Template directory (optional)", &d.template, t))
+                .child(first_commit_toggle(d.first_commit, t, app));
+        }
     }
 
-    // Destination root.
-    if roots.is_empty() {
-        panel = panel.child(
-            div()
-                .text_size(px(t.text_data_sm))
-                .text_color(rgb(t.behind))
-                .child("Add a workspace root in Settings first."),
-        );
-    } else {
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.))
-            .child(field_label("Destination", t))
-            .child(
+    // Destination root (clone / create only).
+    if d.mode != NewMode::AddRoot {
+        if roots.is_empty() {
+            panel = panel.child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .font_family("monospace")
                     .text_size(px(t.text_data_sm))
-                    .text_color(rgb(t.fg1))
-                    .child(SharedString::from(dest_root)),
+                    .text_color(rgb(t.behind))
+                    .child("Add a local path first (Local path tab), or set one in Settings."),
             );
-        if roots.len() > 1 {
-            row = row.child(small_btn("Change root", t, app, |this, cx| {
-                this.new_project_cycle_root(cx)
-            }));
+        } else {
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(field_label("Destination", t))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .font_family("monospace")
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg1))
+                        .child(SharedString::from(dest_root)),
+                );
+            if roots.len() > 1 {
+                row = row.child(small_btn("Change root", t, app, |this, cx| {
+                    this.new_project_cycle_root(cx)
+                }));
+            }
+            panel = panel.child(row);
         }
-        panel = panel.child(row);
     }
 
     if !d.status.is_empty() {
@@ -126,11 +150,10 @@ pub fn render(
         );
     }
 
-    // Actions.
-    let submit_label = if d.mode == NewMode::Clone {
-        "Clone"
-    } else {
-        "Create"
+    let submit_label = match d.mode {
+        NewMode::AddRoot => "Add",
+        NewMode::Clone => "Clone",
+        NewMode::Create => "Create",
     };
     panel = panel.child(
         div()
@@ -145,7 +168,6 @@ pub fn render(
             .child(primary_btn(submit_label, d.busy, t, app)),
     );
 
-    // Centered over a dimmed, click-to-dismiss backdrop.
     let app = app.clone();
     div()
         .id("np-backdrop")

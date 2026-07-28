@@ -95,7 +95,7 @@ impl SettingsState {
             llama_url: field(window, cx, "https://…/model.gguf", ""),
             client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
             ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
-            add_root: field(window, cx, "~/dev", ""),
+            add_root: field(window, cx, "~/Orrery or ~/odoo/odoo19", ""),
             scan_depth: cx.new(|cx| {
                 InputState::new(window, cx)
                     .default_value(cfg.scan_depth.to_string())
@@ -140,6 +140,9 @@ pub fn render(
     }
     if show("notifications") {
         sections.push(notifications_section(s, t, app).into_any_element());
+    }
+    if show("about") {
+        sections.push(about_section(t).into_any_element());
     }
 
     div()
@@ -258,6 +261,12 @@ fn account_section(
 
 fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {
     let mut col = section(t, "Workspace roots");
+    col = col.child(
+        div()
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(t.fg3))
+            .child("A single git repo or a folder of repos."),
+    );
     for (i, root) in s.draft.roots.iter().enumerate() {
         let remove = icon_btn("x", t, app, move |a| {
             if let Some(s) = &mut a.settings
@@ -286,12 +295,26 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
                 .child(remove),
         );
     }
-    // Add a root.
+    // Add a path (smart: single repo vs scan folder).
     let add = {
         let app = app.clone();
-        button("Add", t, move |cx| {
-            app.update(cx, |this, cx| this.settings_add_root(cx));
-        })
+        let (hb, hf) = (t.border_strong, t.fg0);
+        div()
+            .id("btn-Add-root")
+            .px(px(14.))
+            .py(px(7.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(t.button_bg))
+            .border_1()
+            .border_color(rgb(t.border))
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(t.fg1))
+            .cursor_pointer()
+            .hover(move |s| s.border_color(rgb(hb)).text_color(rgb(hf)))
+            .child("Add")
+            .on_click(move |_ev, window, cx| {
+                app.update(cx, |this, cx| this.settings_add_root(window, cx));
+            })
     };
     col = col.child(
         div()
@@ -692,6 +715,38 @@ fn notifications_section(
                 }
             },
         ))
+}
+
+fn about_section(t: &Theme) -> impl IntoElement {
+    section(t, "About & license")
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .text_size(px(t.text_small))
+                .text_color(rgb(t.fg1))
+                .child(
+                    div()
+                        .text_color(rgb(t.fg0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Orrery"),
+                )
+                .child("Original work © 2026 Seb Burrell — MIT License.")
+                .child(
+                    "This fork includes modifications and enhancements by DigitsCode (Azmy).",
+                )
+                .child(
+                    "The MIT license is unchanged: copyright and permission notices are retained in LICENSE and NOTICE.",
+                )
+                .child(
+                    div()
+                        .text_color(rgb(t.fg3))
+                        .font_family("monospace")
+                        .text_size(px(t.text_data_sm))
+                        .child("See NOTICE and LICENSE in the repository root."),
+                ),
+        )
 }
 
 fn save_footer(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl IntoElement {

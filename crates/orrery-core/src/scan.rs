@@ -15,6 +15,8 @@ const SEVEN_DAYS: i64 = 7 * 24 * 3600;
 const THIRTY_DAYS: i64 = 30 * 24 * 3600;
 
 /// Scan all roots and return the discovered repos, marking favorites.
+/// After top-level discovery, checked-out git submodules listed in each
+/// parent's `.gitmodules` are appended with `parent_id` set.
 pub fn scan(
     roots: &[String],
     depth: usize,
@@ -22,8 +24,6 @@ pub fn scan(
     favorites: &HashSet<String>,
     now: i64,
 ) -> Vec<Repo> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     let ignore_set = build_ignore(ignore);
 
     // Discover unique repo paths first (cheap directory walk), then build the
@@ -40,6 +40,40 @@ pub fn scan(
         }
     }
 
+    let parents = build_repos_parallel(&targets, now);
+
+    // Discover checked-out submodules from each parent's .gitmodules.
+    let mut child_targets: Vec<(PathBuf, String, String, String, bool)> = Vec::new();
+    for parent in &parents {
+        let parent_path = PathBuf::from(&parent.id);
+        for rel in submodule_paths(&parent_path) {
+            let child = parent_path.join(&rel);
+            if !is_git_workdir(&child) {
+                continue;
+            }
+            let id = child.to_string_lossy().into_owned();
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            child_targets.push((
+                child,
+                parent.root.clone(),
+                parent.id.clone(),
+                rel,
+                favorites.contains(&id),
+            ));
+        }
+    }
+
+    let children = build_submodule_repos_parallel(&child_targets, now);
+
+    let mut out = parents;
+    out.extend(children);
+    out
+}
+
+fn build_repos_parallel(targets: &[(PathBuf, &str, bool)], now: i64) -> Vec<Repo> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -47,14 +81,49 @@ pub fn scan(
     let out = std::sync::Mutex::new(Vec::with_capacity(targets.len()));
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let (out, next, targets) = (&out, &next, &targets);
+        let (out, next, targets) = (&out, &next, targets);
         for _ in 0..threads {
             scope.spawn(move || loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some((path, root, fav)) = targets.get(i) else {
                     break;
                 };
-                if let Some(repo) = build_repo(path, root, *fav, now) {
+                if let Some(repo) = build_repo(path, root, *fav, now, None, None) {
+                    out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
+                }
+            });
+        }
+    });
+    out.into_inner().unwrap_or_else(|e| e.into_inner())
+}
+
+fn build_submodule_repos_parallel(
+    targets: &[(PathBuf, String, String, String, bool)],
+    now: i64,
+) -> Vec<Repo> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(targets.len().max(1));
+    let out = std::sync::Mutex::new(Vec::with_capacity(targets.len()));
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        let (out, next, targets) = (&out, &next, targets);
+        for _ in 0..threads {
+            scope.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((path, root, parent_id, rel, fav)) = targets.get(i) else {
+                    break;
+                };
+                if let Some(repo) = build_repo(
+                    path,
+                    root,
+                    *fav,
+                    now,
+                    Some(parent_id.clone()),
+                    Some(rel.clone()),
+                ) {
                     out.lock().unwrap_or_else(|e| e.into_inner()).push(repo);
                 }
             });
@@ -64,7 +133,7 @@ pub fn scan(
 }
 
 /// Just the discovered repo paths (no metadata) — used by the watcher to decide
-/// what to watch, far cheaper than a full scan.
+/// what to watch, far cheaper than a full scan. Includes checked-out submodules.
 pub fn repo_paths(roots: &[String], depth: usize, ignore: &[String]) -> Vec<PathBuf> {
     let ignore_set = build_ignore(ignore);
     let mut seen = HashSet::new();
@@ -72,6 +141,13 @@ pub fn repo_paths(roots: &[String], depth: usize, ignore: &[String]) -> Vec<Path
     for root in roots {
         for path in find_repos(&expand(root), depth, &ignore_set) {
             if seen.insert(path.clone()) {
+                // Submodule checkouts under this parent.
+                for rel in submodule_paths(&path) {
+                    let child = path.join(&rel);
+                    if is_git_workdir(&child) && seen.insert(child.clone()) {
+                        out.push(child);
+                    }
+                }
                 out.push(path);
             }
         }
@@ -89,9 +165,17 @@ fn build_ignore(ignore: &[String]) -> GlobSet {
     builder.build().unwrap_or_else(|_| GlobSet::empty())
 }
 
+/// Whether `path` is itself a git working tree (`.git` directory or gitfile).
+pub fn is_git_workdir(path: &Path) -> bool {
+    path.join(".git").exists()
+}
+
 /// Walk `root` up to `depth` levels, collecting directories that contain a
 /// `.git` entry. Skips ignored directory names and does not descend into a
 /// repo once found (so submodules/nested repos aren't double-counted).
+///
+/// The scan root itself is always eligible (depth 0), including when `.git` is
+/// a gitfile (linked worktree) so a lone-repo root is discoverable.
 fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
     let mut repos = Vec::new();
     let mut it = WalkDir::new(root).max_depth(depth).into_iter();
@@ -108,9 +192,10 @@ fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
         let dotgit = entry.path().join(".git");
         if dotgit.exists() {
             // A `.git` *directory* is a real working checkout. A `.git` *file* is
-            // a linked-worktree or submodule pointer — skip those so the same
-            // repository isn't listed twice. Either way, don't descend further.
-            if dotgit.is_dir() {
+            // a linked-worktree or submodule pointer — skip nested ones so the
+            // same repository isn't listed twice, but keep the scan root itself
+            // when it is a lone worktree. Either way, don't descend further.
+            if dotgit.is_dir() || entry.depth() == 0 {
                 repos.push(entry.path().to_path_buf());
             }
             it.skip_current_dir();
@@ -119,7 +204,14 @@ fn find_repos(root: &Path, depth: usize, ignore: &GlobSet) -> Vec<PathBuf> {
     repos
 }
 
-fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo> {
+fn build_repo(
+    path: &Path,
+    root: &str,
+    favorite: bool,
+    now: i64,
+    parent_id: Option<String>,
+    submodule_path: Option<String>,
+) -> Option<Repo> {
     let repo = Repository::open(path).ok()?;
 
     let git = crate::git_ops::status_of(&repo);
@@ -172,7 +264,33 @@ fn build_repo(path: &Path, root: &str, favorite: bool, now: i64) -> Option<Repo>
         private: false,
         favorite,
         ai_summary: None,
+        parent_id,
+        submodule_path,
     })
+}
+
+/// Repo-relative submodule paths declared in `.gitmodules` (empty if missing).
+pub fn submodule_paths(repo: &Path) -> Vec<String> {
+    let text = match std::fs::read_to_string(repo.join(".gitmodules")) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        let Some(rest) = t
+            .strip_prefix("path")
+            .map(|s| s.trim_start())
+            .and_then(|s| s.strip_prefix('='))
+            .map(|s| s.trim())
+        else {
+            continue;
+        };
+        if !rest.is_empty() && !rest.contains('\0') {
+            out.push(rest.to_string());
+        }
+    }
+    out
 }
 
 /// Map last-commit recency to an activity bucket (no commit → stale).
@@ -657,5 +775,77 @@ mod tests {
             "must not descend into a found repo"
         );
         assert!(!names.iter().any(|n| n == "pkg"), "must skip ignored dirs");
+    }
+
+    #[test]
+    fn repo_paths_discovers_lone_repo_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let roots = vec![root.to_string_lossy().into_owned()];
+        let found = repo_paths(&roots, 3, &[]);
+        assert_eq!(found, vec![root.to_path_buf()]);
+        assert!(is_git_workdir(root));
+    }
+
+    #[test]
+    fn repo_paths_discovers_lone_worktree_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // gitfile pointer (linked worktree / submodule style)
+        fs::write(root.join(".git"), "gitdir: /tmp/fake.git\n").unwrap();
+        let roots = vec![root.to_string_lossy().into_owned()];
+        let found = repo_paths(&roots, 3, &[]);
+        assert_eq!(found, vec![root.to_path_buf()]);
+        assert!(is_git_workdir(root));
+    }
+
+    #[test]
+    fn submodule_paths_reads_gitmodules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"tools\"]\n\tpath = vendor/tools\n\turl = git@x:y.git\n\
+             [submodule \"hr\"]\n\tpath = vendor/hr\n",
+        )
+        .unwrap();
+        let paths = submodule_paths(root);
+        assert_eq!(paths, vec!["vendor/tools".to_string(), "vendor/hr".to_string()]);
+    }
+
+    #[test]
+    fn scan_includes_checked_out_submodules_with_parent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let parent = root.join("customer");
+        fs::create_dir_all(&parent).unwrap();
+        git2::Repository::init(&parent).unwrap();
+        fs::write(
+            parent.join(".gitmodules"),
+            "[submodule \"tools\"]\n\tpath = mods/tools\n",
+        )
+        .unwrap();
+        let child = parent.join("mods/tools");
+        fs::create_dir_all(&child).unwrap();
+        git2::Repository::init(&child).unwrap();
+
+        let roots = vec![root.to_string_lossy().into_owned()];
+        let repos = scan(&roots, 4, &[], &HashSet::new(), 0);
+        let parent_id = parent.to_string_lossy().into_owned();
+        let child_id = child.to_string_lossy().into_owned();
+        assert!(
+            repos
+                .iter()
+                .any(|r| r.id == parent_id && r.parent_id.is_none()),
+            "parent missing: {:?}",
+            repos.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        let sub = repos
+            .iter()
+            .find(|r| r.id == child_id)
+            .expect("submodule missing");
+        assert_eq!(sub.parent_id.as_deref(), Some(parent_id.as_str()));
+        assert_eq!(sub.submodule_path.as_deref(), Some("mods/tools"));
     }
 }

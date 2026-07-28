@@ -8,9 +8,18 @@
 use std::rc::Rc;
 
 use gpui::{
-    AppContext, Context, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
+    AppContext, Context, CursorStyle, Entity, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::FluentBuilder, px, rgb,
 };
+use gpui_component::TitleBar;
+use gpui_component::input::{Input, InputState};
+
+/// Expanded sidebar width bounds (px). Collapsed mode uses [`SIDEBAR_COLLAPSED`].
+pub(crate) const SIDEBAR_DEFAULT: f32 = 236.;
+pub(crate) const SIDEBAR_MIN: f32 = 180.;
+pub(crate) const SIDEBAR_MAX: f32 = 420.;
+const SIDEBAR_COLLAPSED: f32 = 56.;
 
 use orrery_core::attention::{AttentionItem, AttentionKind, Severity};
 use orrery_core::model::AppConfig;
@@ -47,7 +56,16 @@ pub enum RepoFilter {
     Public,
     Private,
     Dirty,
+    /// Working-tree changes not yet staged (`unstaged > 0`).
+    Stageable,
+    /// Anything commitable via Commit All (`dirty > 0`).
+    Commitable,
+    /// Local commits not pushed (`ahead > 0`) — needs push.
     Ahead,
+    /// Ready to push (`ahead > 0`) — alias chip for actionability.
+    Pushable,
+    /// Upstream commits not pulled (`behind > 0`) — needs pull.
+    Behind,
     Starred,
     Stale,
     /// Repos with at least one attention item (`orrery_core::attention`) —
@@ -58,12 +76,16 @@ pub enum RepoFilter {
 
 impl RepoFilter {
     /// The chip order shown in the toolbar.
-    pub const ORDER: [RepoFilter; 7] = [
+    pub const ORDER: [RepoFilter; 11] = [
         RepoFilter::All,
         RepoFilter::Public,
         RepoFilter::Private,
         RepoFilter::Dirty,
+        RepoFilter::Stageable,
+        RepoFilter::Commitable,
+        RepoFilter::Pushable,
         RepoFilter::Ahead,
+        RepoFilter::Behind,
         RepoFilter::Starred,
         RepoFilter::Stale,
     ];
@@ -74,7 +96,11 @@ impl RepoFilter {
             RepoFilter::Public => "Public",
             RepoFilter::Private => "Private",
             RepoFilter::Dirty => "Dirty",
+            RepoFilter::Stageable => "Stageable",
+            RepoFilter::Commitable => "Commitable",
+            RepoFilter::Pushable => "Pushable",
             RepoFilter::Ahead => "Ahead",
+            RepoFilter::Behind => "Behind",
             RepoFilter::Starred => "Starred",
             RepoFilter::Stale => "Stale",
             RepoFilter::Attention => "Attention",
@@ -87,7 +113,11 @@ impl RepoFilter {
             RepoFilter::Public => Some("globe"),
             RepoFilter::Private => Some("lock"),
             RepoFilter::Dirty => Some("circle-dot"),
+            RepoFilter::Stageable => Some("plus-square"),
+            RepoFilter::Commitable => Some("git-commit-horizontal"),
+            RepoFilter::Pushable => Some("upload"),
             RepoFilter::Ahead => Some("arrow-up"),
+            RepoFilter::Behind => Some("arrow-down"),
             RepoFilter::Starred => Some("star"),
             RepoFilter::Stale => Some("clock"),
             RepoFilter::Attention => Some("circle-alert"),
@@ -109,7 +139,10 @@ impl RepoFilter {
             RepoFilter::Public => !r.private,
             RepoFilter::Private => r.private,
             RepoFilter::Dirty => r.dirty > 0,
-            RepoFilter::Ahead => r.ahead > 0,
+            RepoFilter::Stageable => r.unstaged > 0,
+            RepoFilter::Commitable => r.dirty > 0,
+            RepoFilter::Pushable | RepoFilter::Ahead => r.ahead > 0,
+            RepoFilter::Behind => r.behind > 0,
             RepoFilter::Starred => r.favorite,
             RepoFilter::Stale => r.activity == Activity::Stale,
             RepoFilter::Attention => attention.contains_key(&r.id),
@@ -312,8 +345,6 @@ pub struct OrreryApp {
     pub devtools: Option<crate::views::devtools::DevToolsState>,
     /// External-service status: GitHub auth + AI backend reachability.
     pub services: Services,
-    /// Whether the system tray came up — gates close-to-tray.
-    pub tray_active: bool,
     /// Handle to the live tray (when it came up) — the attention summary is
     /// pushed through it after each [`Self::recompute_attention`]. Updates are
     /// a short synchronous round-trip to the tray thread.
@@ -338,6 +369,8 @@ pub struct OrreryApp {
     /// Bumped each time a prune scan starts, so a stale scan result from a
     /// cancelled/superseded confirm can't resurrect the strip.
     pub fleet_prune_seq: u64,
+    /// Pending hard-reset confirm: absolute paths to reset to `@{upstream}`.
+    pub fleet_reset: Option<Vec<String>>,
     /// Active toasts, oldest first (rendered bottom-right by
     /// `toast::toast_layer`; see `toast.rs` for the lifecycle).
     pub toasts: Vec<crate::toast::Toast>,
@@ -351,6 +384,17 @@ pub struct OrreryApp {
     pub view_filter: Option<SharedString>,
     /// App-root focus handle, so global key bindings (Esc) dispatch here.
     pub focus: FocusHandle,
+    /// Left-rail width when expanded (px). Clamped to [`SIDEBAR_MIN`]..=[`SIDEBAR_MAX`].
+    pub sidebar_width: f32,
+    /// Icon-only rail — hides labels and contextual panels.
+    pub sidebar_collapsed: bool,
+    /// True while the user is dragging the sidebar resize handle.
+    pub sidebar_dragging: bool,
+    /// Live text filter for the Mission Control repo grid (name / slug / path).
+    /// Created on first paint — `InputState` needs a `Window`.
+    pub repo_search: Option<Entity<InputState>>,
+    /// Keeps the search input observation alive so the grid refilters on type.
+    pub _repo_search_sub: Option<Subscription>,
 }
 
 /// Mission Control's UI state, grouped out of [`OrreryApp`]: the quick filter,
@@ -374,6 +418,14 @@ pub struct GridState {
     pub activity: Option<orrery_core::activity::Activity>,
     /// Whether the contribution graph is shown (dismissible).
     pub activity_open: bool,
+    /// Case-insensitive substring filter over repo name / slug / path.
+    /// Synced from [`OrreryApp::repo_search`] on each keystroke.
+    pub query: String,
+    /// Parent repo ids expanded in the sidebar TREE section.
+    pub tree_expanded: std::collections::HashSet<SharedString>,
+    /// When set, the grid shows this parent and its submodule children.
+    /// `None` = hide submodule children from the flat grid.
+    pub tree_focus: Option<SharedString>,
 }
 
 /// Status of the external integrations Orrery talks to — GitHub (auth) and the
@@ -402,6 +454,9 @@ impl Default for GridState {
             saved_views: load_saved_views(),
             activity: None,
             activity_open: true,
+            query: String::new(),
+            tree_expanded: Default::default(),
+            tree_focus: None,
         }
     }
 }
@@ -480,6 +535,25 @@ impl OrreryApp {
         self.roots = snap.roots;
         self.repos = snap.repos;
         self.recompute_attention();
+    }
+
+    /// After a fleet snapshot lands: if the Changes tab is open, re-read that
+    /// repo's file lists so nested deletions/edits the watcher just noticed
+    /// appear without switching tabs.
+    pub fn refresh_open_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(Overlay::Drawer {
+            repo,
+            tab: DrawerTab::Changes,
+        }) = &self.overlay
+        else {
+            return;
+        };
+        let repo = repo.clone();
+        if self.drawer.repo != repo {
+            return;
+        }
+        self.drawer.diff = crate::drawer::DiffState::Loading;
+        crate::drawer::load_changes(repo, cx);
     }
 
     /// Recompute the ranked attention list (and the per-repo severity lookup)
@@ -708,9 +782,14 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// Open the new-project dialog (clone / init into a workspace root).
-    pub fn open_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use crate::views::newproject::{NewMode, NewProjectData};
+    /// Open the add dialog on a specific tab.
+    pub fn open_add_dialog(
+        &mut self,
+        mode: crate::views::newproject::NewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::views::newproject::NewProjectData;
         use gpui_component::input::InputState;
         let url =
             cx.new(|cx| InputState::new(window, cx).placeholder("https://github.com/owner/repo"));
@@ -718,18 +797,22 @@ impl OrreryApp {
         let remote =
             cx.new(|cx| InputState::new(window, cx).placeholder("git@github.com:owner/repo.git"));
         let template = cx.new(|cx| InputState::new(window, cx).placeholder("~/templates/rust"));
+        let root_path =
+            cx.new(|cx| InputState::new(window, cx).placeholder("~/Orrery or ~/odoo/odoo19"));
         let subs = vec![
             cx.observe(&url, |_this, _e, cx| cx.notify()),
             cx.observe(&name, |_this, _e, cx| cx.notify()),
             cx.observe(&remote, |_this, _e, cx| cx.notify()),
             cx.observe(&template, |_this, _e, cx| cx.notify()),
+            cx.observe(&root_path, |_this, _e, cx| cx.notify()),
         ];
         self.overlay = Some(Overlay::NewProject(NewProjectData {
-            mode: NewMode::Clone,
+            mode,
             url,
             name,
             remote,
             template,
+            root_path,
             first_commit: true,
             root: 0,
             status: "".into(),
@@ -771,8 +854,8 @@ impl OrreryApp {
         cx.notify();
     }
 
-    /// Validate + run the new-project dialog (clone/init off the UI thread), then
-    /// rescan and close on success.
+    /// Validate + run the add dialog (add root / clone / init), then rescan
+    /// and close on success.
     pub fn submit_new_project(&mut self, cx: &mut Context<Self>) {
         use crate::views::newproject::NewMode;
         let Some(Overlay::NewProject(d)) = &self.overlay else {
@@ -782,13 +865,46 @@ impl OrreryApp {
             return;
         }
         let mode = d.mode;
+
+        // ── Add local path (single repo or scan folder) ───────────────────
+        if mode == NewMode::AddRoot {
+            let raw = d.root_path.read(cx).value().trim().to_string();
+            match Self::prepare_workspace_root(&raw, &self.config.roots) {
+                Ok((store, is_repo)) => {
+                    self.config.roots.push(store.clone());
+                    if let Err(e) = orrery_core::config::save(&self.config) {
+                        let _ = self.config.roots.pop();
+                        self.set_new_project_status(&format!("Save failed: {e}"), cx);
+                        return;
+                    }
+                    self.close_overlay();
+                    let (title, detail) = if is_repo {
+                        (
+                            "Added repo",
+                            format!("Scanning {store} as a single repository."),
+                        )
+                    } else {
+                        (
+                            "Added scan root",
+                            format!("Scanning repos under {store}."),
+                        )
+                    };
+                    self.push_toast(ToastKind::Success, title, Some(detail.into()), cx);
+                    self.rescan(cx);
+                }
+                Err(msg) => self.set_new_project_status(&msg, cx),
+            }
+            return;
+        }
+
+        // ── Clone / Create into an existing root ──────────────────────────
         let name = d.name.read(cx).value().trim().to_string();
         let url = d.url.read(cx).value().trim().to_string();
         let remote = d.remote.read(cx).value().trim().to_string();
         let template = d.template.read(cx).value().trim().to_string();
         let first_commit = d.first_commit;
         let Some(root) = self.config.roots.get(d.root).cloned() else {
-            self.set_new_project_status("Add a workspace root in Settings first.", cx);
+            self.set_new_project_status("Add a local path first (Local path tab).", cx);
             return;
         };
         if name.is_empty() {
@@ -815,6 +931,7 @@ impl OrreryApp {
                 .background_executor()
                 .spawn(async move {
                     match mode {
+                        NewMode::AddRoot => unreachable!("handled above"),
                         NewMode::Clone => orrery_core::git_ops::clone(&url, &dest),
                         NewMode::Create => orrery_core::git_ops::init(
                             &dest,
@@ -848,6 +965,32 @@ impl OrreryApp {
             d.status = msg.to_string().into();
         }
         cx.notify();
+    }
+
+    /// Expand `raw`, require an existing directory, detect single-repo vs scan
+    /// folder, and reject duplicates against `existing` (expanded path compare).
+    /// Returns `(absolute_path, is_single_repo)`.
+    fn prepare_workspace_root(
+        raw: &str,
+        existing: &[String],
+    ) -> Result<(String, bool), String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("Enter a path.".into());
+        }
+        let path = orrery_core::scan::expand(raw);
+        if !path.is_dir() {
+            return Err(format!("Not a directory: {}", path.display()));
+        }
+        let store = path.to_string_lossy().into_owned();
+        let already = existing
+            .iter()
+            .any(|r| orrery_core::scan::expand(r) == path);
+        if already {
+            return Err("That path is already configured.".into());
+        }
+        let is_repo = orrery_core::scan::is_git_workdir(&path);
+        Ok((store, is_repo))
     }
 
     /// The current palette result list (actions + repos + code hits).
@@ -1591,8 +1734,9 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Drawer Changes tab: generate a commit message for the staged diff (gated
-    /// on `aiReady`). The (subject, body) suggestion lands in
+    /// Drawer Changes tab: generate a commit message from the full working-tree
+    /// diff (staged + unstaged + untracked), like Cursor / PyCharm — gated on
+    /// `aiReady`. The (subject, body) suggestion lands in
     /// `drawer.commit_suggestion` and, on success, pre-fills the composer's
     /// subject + body fields so it's editable before committing.
     pub fn drawer_generate_commit(&mut self, cx: &mut Context<Self>) {
@@ -1606,10 +1750,20 @@ impl OrreryApp {
             let id = repo.to_string();
             let diff = cx
                 .background_executor()
-                .spawn(async move { orrery_core::git_ops::staged_diff(&id).unwrap_or_default() })
+                .spawn(async move {
+                    // Prefer the full working tree (what Commit All will record).
+                    // Fall back to staged-only if somehow workdir is empty but
+                    // the index isn't (shouldn't happen, but cheap).
+                    let full = orrery_core::git_ops::working_diff(&id).unwrap_or_default();
+                    if !full.trim().is_empty() {
+                        full
+                    } else {
+                        orrery_core::git_ops::staged_diff(&id).unwrap_or_default()
+                    }
+                })
                 .await;
             let result = if diff.trim().is_empty() {
-                Err("Nothing staged — `git add` your changes first.".to_string())
+                Err("Working tree clean — nothing to commit.".to_string())
             } else {
                 crate::task::run(async move { orrery_core::ai::commit_message(&diff).await })
                     .await
@@ -1635,8 +1789,15 @@ impl OrreryApp {
                         this.drawer.commit_suggestion = Some((subject.into(), body.into()));
                     }
                     Err(e) => {
-                        this.drawer.commit_suggestion =
-                            Some((crate::data::oneline(e).into(), "".into()));
+                        // Don't put the error into the suggestion card (that
+                        // used to offer a broken "Commit this" on the error).
+                        this.drawer.commit_suggestion = None;
+                        this.push_toast(
+                            ToastKind::Error,
+                            "Generate message failed",
+                            Some(crate::data::oneline(e).into()),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -1746,6 +1907,75 @@ impl OrreryApp {
                     }
                     Err(e) => {
                         this.upsert_toast(key, ToastKind::Error, "Push failed", Some(e.into()), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drawer: two-click `git reset --hard @{upstream}` (fetch + hard reset to
+    /// `origin/<branch>`). First click arms the confirm label; second executes.
+    pub fn drawer_reset_hard(&mut self, cx: &mut Context<Self>) {
+        if self.drawer.reset_hard_busy {
+            return;
+        }
+        if !self.drawer.reset_hard_armed {
+            self.drawer.reset_hard_armed = true;
+            cx.notify();
+            return;
+        }
+        let repo = self.drawer.repo.clone();
+        let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
+        self.drawer.reset_hard_busy = true;
+        self.drawer.reset_hard_armed = false;
+        let key = format!("reset-hard:{repo}");
+        self.upsert_toast(
+            key.clone(),
+            ToastKind::Progress,
+            format!("Resetting {name}…"),
+            None,
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let id = repo.to_string();
+            let result = cx
+                .background_executor()
+                .spawn(async move { orrery_core::git_ops::reset_hard_upstream(&id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.drawer.repo == repo {
+                    this.drawer.reset_hard_busy = false;
+                }
+                match result {
+                    Ok(orrery_core::git_ops::OpOutcome::Done(msg)) => {
+                        this.upsert_toast(
+                            key,
+                            ToastKind::Success,
+                            "Reset hard",
+                            Some(msg.into()),
+                            cx,
+                        );
+                        this.rescan(cx);
+                    }
+                    Ok(orrery_core::git_ops::OpOutcome::Skipped(reason)) => {
+                        this.upsert_toast(
+                            key,
+                            ToastKind::Info,
+                            "Reset skipped",
+                            Some(reason.into()),
+                            cx,
+                        );
+                    }
+                    Err(e) => {
+                        this.upsert_toast(
+                            key,
+                            ToastKind::Error,
+                            "Reset failed",
+                            Some(e.into()),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -1961,16 +2191,62 @@ impl OrreryApp {
         .detach();
     }
 
-    /// Append the typed root to the draft.
-    pub fn settings_add_root(&mut self, cx: &mut Context<Self>) {
+    /// Append a typed workspace path to the draft + live config (smart detect),
+    /// persist, toast, and rescan.
+    pub fn settings_add_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = &self.settings else { return };
         let val = s.add_root.read(cx).value().trim().to_string();
         if val.is_empty() {
             return;
         }
-        if let Some(s) = &mut self.settings {
-            s.draft.roots.push(val);
-            s.saved = false;
+        // Dedupe against draft roots (what the user sees) and live config.
+        let existing: Vec<String> = self
+            .settings
+            .as_ref()
+            .map(|s| s.draft.roots.clone())
+            .unwrap_or_else(|| self.config.roots.clone());
+        match Self::prepare_workspace_root(&val, &existing) {
+            Ok((store, is_repo)) => {
+                if let Some(s) = &mut self.settings {
+                    s.draft.roots.push(store.clone());
+                    s.saved = false;
+                    let input = s.add_root.clone();
+                    input.update(cx, |st, cx| st.set_value("", window, cx));
+                }
+                if !self
+                    .config
+                    .roots
+                    .iter()
+                    .any(|r| orrery_core::scan::expand(r) == orrery_core::scan::expand(&store))
+                {
+                    self.config.roots.push(store.clone());
+                }
+                if let Err(e) = orrery_core::config::save(&self.config) {
+                    self.push_toast(
+                        ToastKind::Error,
+                        "Save failed",
+                        Some(e.to_string().into()),
+                        cx,
+                    );
+                    return;
+                }
+                let (title, detail) = if is_repo {
+                    (
+                        "Added repo",
+                        format!("Scanning {store} as a single repository."),
+                    )
+                } else {
+                    (
+                        "Added scan root",
+                        format!("Scanning repos under {store}."),
+                    )
+                };
+                self.push_toast(ToastKind::Success, title, Some(detail.into()), cx);
+                self.rescan(cx);
+            }
+            Err(msg) => {
+                self.push_toast(ToastKind::Error, "Could not add path", Some(msg.into()), cx);
+            }
         }
         cx.notify();
     }
@@ -2003,6 +2279,11 @@ impl OrreryApp {
             .parse::<usize>()
             .unwrap_or(draft.scan_depth)
             .clamp(1, 8);
+        // Chrome / groups are edited outside Settings — keep the live values.
+        draft.sidebar_width = self.config.sidebar_width;
+        draft.sidebar_collapsed = self.config.sidebar_collapsed;
+        draft.workspace_groups = self.config.workspace_groups.clone();
+        draft.active_workspace_group = self.config.active_workspace_group.clone();
 
         let _ = orrery_core::config::save(&draft);
         self.config = draft.clone();
@@ -2948,6 +3229,103 @@ impl OrreryApp {
         cx.notify();
     }
 
+    /// Collapse/expand the left rail (icon-only vs full labels + contextual panel).
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.sidebar_dragging = false;
+        self.persist_sidebar_chrome();
+        cx.notify();
+    }
+
+    /// Live width of the left rail (collapsed icon strip or the expanded width).
+    fn sidebar_w(&self) -> f32 {
+        if self.sidebar_collapsed {
+            SIDEBAR_COLLAPSED
+        } else {
+            self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX)
+        }
+    }
+
+    /// Write sidebar width/collapsed into config.toml (keeps other settings).
+    fn persist_sidebar_chrome(&mut self) {
+        self.config.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        self.config.sidebar_collapsed = self.sidebar_collapsed;
+        let _ = orrery_core::config::save(&self.config);
+    }
+
+    /// Persist workspace groups + active group name.
+    fn persist_workspace_groups(&mut self) {
+        let _ = orrery_core::config::save(&self.config);
+    }
+
+    /// Does `path` belong to the named group?
+    fn group_matches_path(group: &orrery_core::model::WorkspaceGroup, path: &str) -> bool {
+        group.prefixes.iter().any(|p| {
+            let p = p.trim_end_matches('/');
+            path == p || path.starts_with(&format!("{p}/"))
+        })
+    }
+
+    /// Absolute paths of repos in the active workspace group (or empty).
+    fn active_group_repo_paths(&self) -> Vec<String> {
+        let Some(name) = self.config.active_workspace_group.as_deref() else {
+            return Vec::new();
+        };
+        let Some(group) = self.config.workspace_groups.iter().find(|g| g.name == name) else {
+            return Vec::new();
+        };
+        self.rows
+            .iter()
+            .filter(|r| Self::group_matches_path(group, r.id.as_ref()))
+            .map(|r| r.id.to_string())
+            .collect()
+    }
+
+    /// Activate a workspace group filter (or clear when `None`).
+    pub fn set_workspace_group(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.config.active_workspace_group = name;
+        self.persist_workspace_groups();
+        cx.notify();
+    }
+
+    /// Seed Odoo-style groups if none exist, then persist.
+    pub fn seed_workspace_groups(&mut self, cx: &mut Context<Self>) {
+        if orrery_core::config::seed_odoo_groups_if_empty(&mut self.config) {
+            self.persist_workspace_groups();
+            self.push_toast(
+                ToastKind::Info,
+                "Workspace groups",
+                Some("Seeded Core / Digits / Custom under your roots.".into()),
+                cx,
+            );
+        } else if self.config.workspace_groups.is_empty() {
+            self.push_toast(
+                ToastKind::Info,
+                "No groups",
+                Some("Add roots that contain core/, digits/, or custom/.".into()),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
+    /// Fleet Pull (or Fetch) every repo in the active workspace group.
+    pub fn run_active_group_fleet(&mut self, op: crate::fleet::FleetOp, cx: &mut Context<Self>) {
+        let repos = self.active_group_repo_paths();
+        if repos.is_empty() {
+            self.push_toast(
+                ToastKind::Info,
+                "No repos in group",
+                Some("Select a workspace group with matching repos first.".into()),
+                cx,
+            );
+            return;
+        }
+        // Mirror selection so the fleet bar reflects the run target.
+        self.selected = repos.iter().cloned().map(SharedString::from).collect();
+        self.run_fleet_repos(op, repos, cx);
+    }
+
     /// Force-refresh host enrichment for every repo (ignores the TTL), then
     /// reload the grid. The toolbar's "Fetch all".
     pub fn fetch_all_hosts(&mut self, cx: &mut Context<Self>) {
@@ -3094,8 +3472,9 @@ impl OrreryApp {
     }
 
     /// Absolute row indices passing every active filter (chip AND root AND
-    /// language), in the active sort order.
+    /// language AND name query), in the active sort order.
     pub(crate) fn visible_rows(&self) -> Vec<usize> {
+        let q = self.grid.query.trim().to_lowercase();
         let mut v: Vec<usize> = self
             .rows
             .iter()
@@ -3107,6 +3486,34 @@ impl OrreryApp {
                     .language
                     .as_ref()
                     .is_none_or(|lang| &r.language == lang)
+            })
+            .filter(|(_, r)| {
+                let Some(name) = self.config.active_workspace_group.as_deref() else {
+                    return true;
+                };
+                self.config
+                    .workspace_groups
+                    .iter()
+                    .find(|g| g.name == name)
+                    .is_some_and(|g| Self::group_matches_path(g, r.id.as_ref()))
+            })
+            .filter(|(_, r)| {
+                if q.is_empty() {
+                    return true;
+                }
+                r.name.to_lowercase().contains(&q)
+                    || r.slug.to_lowercase().contains(&q)
+                    || r.path.to_lowercase().contains(&q)
+            })
+            .filter(|(_, r)| {
+                // Default: hide submodule children. Focusing a parent in TREE
+                // shows that parent + its children only.
+                match (&self.grid.tree_focus, &r.parent_id) {
+                    (None, Some(_)) => false,
+                    (None, None) => true,
+                    (Some(focus), None) => &r.id == focus,
+                    (Some(focus), Some(parent)) => parent == focus || &r.id == focus,
+                }
             })
             .map(|(i, _)| i)
             .collect();
@@ -3135,6 +3542,29 @@ impl OrreryApp {
             });
         }
         v
+    }
+
+    /// Create the Mission Control name-filter input once (needs a `Window`).
+    fn ensure_repo_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.repo_search.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter repos by name…"));
+        let sub = cx.observe(&input, |this, input, cx| {
+            this.grid.query = input.read(cx).value().to_string();
+            cx.notify();
+        });
+        self.repo_search = Some(input);
+        self._repo_search_sub = Some(sub);
+    }
+
+    /// Clear the Mission Control name filter (Esc when nothing else is open).
+    fn clear_repo_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.grid.query.clear();
+        if let Some(input) = &self.repo_search {
+            input.update(cx, |st, cx| st.set_value("", window, cx));
+        }
+        cx.notify();
     }
 
     /// Refresh host enrichment (stars/topics/issues/release/visibility) from
@@ -3281,6 +3711,29 @@ impl OrreryApp {
             .border_b_1()
             .border_color(rgb(t.border))
             .bg(rgb(t.page))
+            // Collapse / expand the left rail (not the grid/list layout buttons)
+            .child(
+                div()
+                    .id("header-sidebar-toggle")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(32.))
+                    .h(px(32.))
+                    .rounded(px(t.r_sm))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(t.surface_hover)))
+                    .child(lucide(
+                        if self.sidebar_collapsed {
+                            "panel-left-open"
+                        } else {
+                            "panel-left-close"
+                        },
+                        16.,
+                        t.fg1,
+                    ))
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_sidebar(cx))),
+            )
             // brand
             .child(
                 div()
@@ -3353,22 +3806,54 @@ impl OrreryApp {
                             .child("⌘K"),
                     ),
             )
-            .child(
-                div()
-                    .id("header-new")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(32.))
-                    .h(px(32.))
-                    .rounded(px(t.r_sm))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(t.surface_hover)))
-                    .child(lucide("plus", 16., t.fg1))
-                    .on_click(
-                        cx.listener(|this, _ev, window, cx| this.open_new_project(window, cx)),
-                    ),
-            )
+            .child({
+                use gpui_component::button::{Button, ButtonVariants as _};
+                use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+                let app_entity = cx.entity();
+                Button::new("header-new")
+                    .ghost()
+                    .icon(gpui_component::IconName::Plus)
+                    .tooltip("Add a local path, clone from GitHub, or create a repo")
+                    .dropdown_menu(move |menu, _window, _cx| {
+                        let app1 = app_entity.clone();
+                        let app2 = app_entity.clone();
+                        let app3 = app_entity.clone();
+                        menu.item(
+                            PopupMenuItem::new("Add local path…").on_click(move |_, window, cx| {
+                                app1.update(cx, |this, cx| {
+                                    this.open_add_dialog(
+                                        crate::views::newproject::NewMode::AddRoot,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Clone from GitHub…").on_click(move |_, window, cx| {
+                                app2.update(cx, |this, cx| {
+                                    this.open_add_dialog(
+                                        crate::views::newproject::NewMode::Clone,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                        )
+                        .separator()
+                        .item(
+                            PopupMenuItem::new("New repository…").on_click(move |_, window, cx| {
+                                app3.update(cx, |this, cx| {
+                                    this.open_add_dialog(
+                                        crate::views::newproject::NewMode::Create,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                        )
+                    })
+            })
             .child(
                 div()
                     .id("header-rescan")
@@ -3386,6 +3871,8 @@ impl OrreryApp {
     }
 
     fn sidebar(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let collapsed = self.sidebar_collapsed;
+        let width = self.sidebar_w();
         let mut nav = div().flex().flex_col().gap(px(4.));
         for (view, icon_name, label) in NAV {
             let active = self.view == view;
@@ -3395,8 +3882,9 @@ impl OrreryApp {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(10.))
-                .px(px(9.))
+                .justify_center()
+                .gap(px(if collapsed { 0. } else { 10. }))
+                .px(px(if collapsed { 0. } else { 9. }))
                 .py(px(7.))
                 .rounded(px(t.r_sm))
                 .text_size(px(t.text_small))
@@ -3408,8 +3896,12 @@ impl OrreryApp {
                     this.maybe_load_view(view, window, cx);
                     cx.notify();
                 }))
-                .child(lucide(icon_name, 16., fg))
-                .child(SharedString::from(label.to_string()));
+                .child(lucide(icon_name, 16., fg));
+            if !collapsed {
+                item = item
+                    .justify_start()
+                    .child(SharedString::from(label.to_string()));
+            }
             if active {
                 item = item.bg(rgb(t.accent_wash));
             }
@@ -3421,54 +3913,96 @@ impl OrreryApp {
                 View::Inbox => self.inbox_badge(),
                 _ => (0, false),
             };
-            if n > 0 {
+            if n > 0 && !collapsed {
                 item = item.child(div().flex_1()).child(badge(n, urgent, t));
             }
             nav = nav.child(item);
         }
 
-        div()
+        let mut rail = div()
             .flex()
             .flex_col()
-            .w(px(236.))
+            .w(px(width))
             .h_full()
-            .px(px(12.))
+            .px(px(if collapsed { 8. } else { 12. }))
             .py(px(16.))
             .gap(px(16.))
             .border_r_1()
             .border_color(rgb(t.border))
             .bg(rgb(t.page))
             // Primary nav stays put at the top…
-            .child(nav)
+            .child(nav);
+
+        if !collapsed {
             // …while the area below it is contextual: it swaps with the active
             // view (Mission Control shows the ROOTS / LANGUAGES filters). Scrolls
             // independently so the footer stays pinned.
-            .child(
-                div()
-                    .id("sidebar-context")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_y_scroll()
-                    .children(self.contextual_sidebar(t, cx)),
-            )
-            // footer pinned to the bottom
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .pt(px(10.))
-                    .border_t_1()
-                    .border_color(rgb(t.border))
-                    .font_family("monospace")
-                    .text_size(px(t.text_data_sm))
-                    .text_color(rgb(t.fg3))
-                    .child(lucide("hard-drive", 13., t.fg3))
-                    .child("Scanned just now"),
-            )
+            rail = rail
+                .child(
+                    div()
+                        .id("sidebar-context")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .overflow_y_scroll()
+                        .children(self.contextual_sidebar(t, cx)),
+                )
+                // footer pinned to the bottom
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .pt(px(10.))
+                        .border_t_1()
+                        .border_color(rgb(t.border))
+                        .font_family("monospace")
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg3))
+                        .child(lucide("hard-drive", 13., t.fg3))
+                        .child("Scanned just now"),
+                );
+        } else {
+            rail = rail.child(div().flex_1());
+        }
+
+        // Rail + drag handle (expanded only). Handle drag updates `sidebar_width`.
+        div()
+            .flex()
+            .flex_row()
+            .h_full()
+            .flex_shrink_0()
+            .child(rail)
+            .when(!collapsed, |this| {
+                this.child(
+                    div()
+                        .id("sidebar-resize")
+                        .w(px(5.))
+                        .ml(px(-2.))
+                        .h_full()
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .hover(|s| s.bg(rgb(t.border_accent)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _ev, _window, cx| {
+                                this.sidebar_dragging = true;
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, _ev, _window, cx| {
+                                // Right-click resets to the default width.
+                                this.sidebar_width = SIDEBAR_DEFAULT;
+                                this.sidebar_dragging = false;
+                                this.persist_sidebar_chrome();
+                                cx.notify();
+                            }),
+                        ),
+                )
+            })
     }
 
     /// The view-specific sidebar content shown below the fixed nav. `None` for
@@ -3687,6 +4221,7 @@ impl OrreryApp {
                     "Notifications".into(),
                     None,
                 ),
+                (Some("about".into()), "orbit", "About".into(), None),
             ],
         )
     }
@@ -3819,6 +4354,119 @@ impl OrreryApp {
         let roots = sorted(root_counts);
         let langs = sorted(lang_counts);
 
+        // ── GROUPS (workspace path-prefix sets + fleet Pull/Fetch) ─────────
+        let hov = t.surface_hover;
+        let active_group = self.config.active_workspace_group.clone();
+        let mut groups_sec = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(section_header_action(
+                "GROUPS",
+                "plus",
+                t,
+                cx.listener(|this, _e, _w, cx| this.seed_workspace_groups(cx)),
+            ));
+        if self.config.workspace_groups.is_empty() {
+            groups_sec = groups_sec.child(
+                div()
+                    .px(px(9.))
+                    .py(px(4.))
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(t.fg3))
+                    .child("Press + to seed Core / Digits / Custom groups."),
+            );
+        } else {
+            groups_sec = groups_sec.child(sidebar_filter_item(
+                "group-all".into(),
+                lucide("folder", 14., t.fg2).into_any_element(),
+                "All groups".into(),
+                None,
+                active_group.is_none(),
+                t,
+                cx.listener(|this, _e, _w, cx| this.set_workspace_group(None, cx)),
+            ));
+            for g in &self.config.workspace_groups {
+                let name = g.name.clone();
+                let active = active_group.as_deref() == Some(name.as_str());
+                let n = self
+                    .rows
+                    .iter()
+                    .filter(|r| Self::group_matches_path(g, r.id.as_ref()))
+                    .count();
+                let fg = if active { t.accent_bright } else { t.fg1 };
+                let pick = name.clone();
+                let mut row = div()
+                    .id(SharedString::from(format!("group-{name}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.))
+                    .px(px(9.))
+                    .py(px(6.))
+                    .rounded(px(t.r_sm))
+                    .text_size(px(t.text_small))
+                    .text_color(rgb(fg))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgb(hov)))
+                    .on_click(cx.listener(move |this, _e, _w, cx| {
+                        this.set_workspace_group(Some(pick.clone()), cx);
+                    }))
+                    .child(lucide("folder-tree", 14., fg))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(SharedString::from(name.clone())),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(t.text_data_sm))
+                            .text_color(rgb(t.fg3))
+                            .child(SharedString::from(n.to_string())),
+                    );
+                if active {
+                    row = row
+                        .bg(rgb(t.accent_wash))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("group-fetch-{name}")))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(22.))
+                                .h(px(22.))
+                                .rounded(px(t.r_xs))
+                                .hover(move |s| s.bg(rgb(hov)))
+                                .child(lucide("cloud-download", 13., t.fg2))
+                                .on_click(cx.listener(|this, _e, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.run_active_group_fleet(crate::fleet::FleetOp::Fetch, cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("group-pull-{name}")))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .w(px(22.))
+                                .h(px(22.))
+                                .rounded(px(t.r_xs))
+                                .hover(move |s| s.bg(rgb(hov)))
+                                .child(lucide("arrow-down", 13., t.primary))
+                                .on_click(cx.listener(|this, _e, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.run_active_group_fleet(crate::fleet::FleetOp::Pull, cx);
+                                })),
+                        );
+                }
+                groups_sec = groups_sec.child(row);
+            }
+        }
+
         // ── VIEWS (saved quick filters) ────────────────────────────────────
         let mut views_sec = div()
             .flex()
@@ -3943,6 +4591,7 @@ impl OrreryApp {
             .flex()
             .flex_col()
             .gap(px(14.))
+            .child(groups_sec)
             .child(views_sec)
             .child(roots_sec)
             .child(langs_sec)
@@ -4050,7 +4699,7 @@ impl OrreryApp {
             .children(fleet_bar)
     }
 
-    /// The "All repos · N repos" heading + right-aligned action buttons.
+    /// The "All repos · N repos" heading + name filter + right-aligned actions.
     fn toolbar(&self, t: &Theme, cx: &mut Context<Self>, count: usize) -> impl IntoElement {
         let title = if self.grid.filter == RepoFilter::All {
             "All repos".to_string()
@@ -4058,7 +4707,7 @@ impl OrreryApp {
             format!("{} repos", self.grid.filter.label())
         };
         let attention_label = format!("Attention {}", self.attention_count());
-        div()
+        let mut bar = div()
             .flex()
             .flex_row()
             .items_center()
@@ -4078,7 +4727,11 @@ impl OrreryApp {
                     .text_size(px(t.text_data_sm))
                     .text_color(rgb(t.fg2))
                     .child(SharedString::from(format!("{count} repos"))),
-            )
+            );
+        if let Some(search) = &self.repo_search {
+            bar = bar.child(div().w(px(260.)).child(Input::new(search)));
+        }
+        bar = bar
             .child(div().flex_1())
             // Contribution-graph toggle (active when shown).
             .child(tool_btn(
@@ -4144,7 +4797,8 @@ impl OrreryApp {
                 self.grid.layout == Layout::List,
                 t,
                 cx.listener(|this, _ev, _w, cx| this.set_layout(Layout::List, cx)),
-            ))
+            ));
+        bar
     }
 
     /// The single-select quick-filter chips (All / Public / … / Stale).
@@ -4319,16 +4973,50 @@ fn tool_btn(
 }
 
 /// Responsive column count from the window width: aim for ~340px-wide cards
-/// (after the 236px sidebar), clamped to a sensible range.
-fn columns(viewport_width: f32) -> usize {
-    (((viewport_width - 236.) / 340.).floor() as usize).clamp(1, 6)
+/// (after the sidebar), clamped to a sensible range.
+fn columns(viewport_width: f32, sidebar_w: f32) -> usize {
+    (((viewport_width - sidebar_w) / 340.).floor() as usize).clamp(1, 6)
 }
 
 impl Render for OrreryApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_repo_search(window, cx);
         let t = self.theme.clone();
+        let sidebar_w = self.sidebar_w();
         // Responsive grid columns from the current window width.
-        let cols = columns(f32::from(window.viewport_size().width));
+        let cols = columns(f32::from(window.viewport_size().width), sidebar_w);
+
+        // Client-side window chrome (min / max / close). On Wayland GPUI defaults
+        // to CSD, so without this bar the window has no control buttons.
+        // Default TitleBar close calls `remove_window` / quits — do not remap
+        // to minimize (that made ✕ feel broken).
+        let title_bar = TitleBar::new()
+            .bg(rgb(t.surface))
+            .border_color(rgb(t.border_strong))
+            .text_color(rgb(t.fg0))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(lucide("orbit", 16., t.primary))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(px(13.))
+                            .text_color(rgb(t.fg0))
+                            .child("Orrery"),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(t.text_data_sm))
+                            .text_color(rgb(t.fg2))
+                            .child(SharedString::from(format!("· {} repos", self.rows.len()))),
+                    ),
+            );
+
         let shell = div()
             .flex()
             .flex_col()
@@ -4336,6 +5024,7 @@ impl Render for OrreryApp {
             .bg(rgb(t.page))
             .text_color(rgb(t.fg1))
             .font_family("sans-serif")
+            .child(title_bar)
             .child(self.header(&t, cx))
             .child(
                 div()
@@ -4362,10 +5051,14 @@ impl Render for OrreryApp {
                     this.close_overlay();
                     window.focus(&this.focus, cx);
                     cx.notify();
+                } else if this.fleet_reset.is_some() {
+                    this.cancel_fleet_reset(cx);
                 } else if this.fleet_prune.is_some() {
                     // A pending prune confirm dismisses first, keeping the
                     // selection — a second Esc clears that.
                     this.cancel_fleet_prune(cx);
+                } else if !this.grid.query.is_empty() {
+                    this.clear_repo_query(window, cx);
                 } else if !this.selected.is_empty() {
                     // No overlay to dismiss — Esc clears the fleet selection.
                     this.clear_selection(cx);
@@ -4383,6 +5076,28 @@ impl Render for OrreryApp {
             .on_action(cx.listener(|this, _: &crate::PaletteConfirm, window, cx| {
                 this.confirm_palette(window, cx);
             }))
+            // Sidebar resize: track mouse while the handle is held.
+            .on_mouse_move(cx.listener(|this, _ev, window, cx| {
+                if !this.sidebar_dragging || this.sidebar_collapsed {
+                    return;
+                }
+                let x = f32::from(window.mouse_position().x);
+                let next = x.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                if (next - this.sidebar_width).abs() >= 1. {
+                    this.sidebar_width = next;
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, cx| {
+                    if this.sidebar_dragging {
+                        this.sidebar_dragging = false;
+                        this.persist_sidebar_chrome();
+                        cx.notify();
+                    }
+                }),
+            )
             .relative()
             .size_full()
             .child(shell);

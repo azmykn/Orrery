@@ -119,4 +119,8 @@ Next up and ongoing work lives in [the issue list](../../issues).
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE) — original work © 2026 Seb Burrell.
+
+This fork includes modifications by **DigitsCode** (Azmy). See [NOTICE](NOTICE)
+for attribution. The MIT terms are unchanged; the original copyright and
+permission notices are retained.

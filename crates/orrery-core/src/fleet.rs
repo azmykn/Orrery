@@ -179,6 +179,17 @@ pub fn pull_op() -> impl Fn(&str) -> Outcome + Sync {
     }
 }
 
+/// Fleet hard reset to `@{upstream}` (`git reset --hard origin/<branch>`).
+/// Destructive: discards local commits and dirty work. Skips (not fails) when
+/// there is no upstream / detached HEAD.
+pub fn reset_hard_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| match git_ops::reset_hard_upstream(path) {
+        Ok(OpOutcome::Done(s)) => Outcome::Ok(s),
+        Ok(OpOutcome::Skipped(r)) => Outcome::Skipped(r),
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
 /// Fleet prune, delegating to `git_ops::prune_branches` (merged /
 /// upstream-gone local branches only — never HEAD, main, or master; see
 /// `git_ops::prunable`). Repos with nothing prunable are skips, so the report

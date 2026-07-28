@@ -132,6 +132,9 @@ pub fn spawn(
                         app.apply_snapshot(snap);
                         // Drop fleet-selected ids for repos that vanished.
                         app.prune_selection();
+                        // Nested WT edits/deletes just triggered this rescan —
+                        // keep the open Changes tab in sync with the new status.
+                        app.refresh_open_changes(cx);
                         // New/changed repos → refresh the semantic index (cheap
                         // when unchanged; a no-op unless AI is ready) and host
                         // enrichment (skips repos still within the cache TTL).

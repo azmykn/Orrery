@@ -83,8 +83,43 @@ impl Default for AppConfig {
             notify_ci_failure: true,
             notify_attention: true,
             notify_agent_finished: true,
+            sidebar_width: crate::model::default_sidebar_width(),
+            sidebar_collapsed: false,
+            workspace_groups: Vec::new(),
+            active_workspace_group: None,
         }
     }
+}
+
+/// If `workspace_groups` is empty, seed Odoo-style groups (`core` / `digits` /
+/// `custom`) under each configured root that has those directories. Returns true
+/// when groups were added (caller should persist).
+pub fn seed_odoo_groups_if_empty(cfg: &mut AppConfig) -> bool {
+    if !cfg.workspace_groups.is_empty() {
+        return false;
+    }
+    let mut groups = Vec::new();
+    for root in &cfg.roots {
+        let root_path = crate::scan::expand(root);
+        let root_label = root_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(root.as_str());
+        for (label, sub) in [("Core", "core"), ("Digits", "digits"), ("Custom", "custom")] {
+            let p = root_path.join(sub);
+            if p.is_dir() {
+                groups.push(crate::model::WorkspaceGroup {
+                    name: format!("{root_label} · {label}"),
+                    prefixes: vec![p.to_string_lossy().into_owned()],
+                });
+            }
+        }
+    }
+    if groups.is_empty() {
+        return false;
+    }
+    cfg.workspace_groups = groups;
+    true
 }
 
 /// Load config, falling back to (and writing) defaults if absent/invalid.
@@ -93,7 +128,10 @@ pub fn load() -> AppConfig {
     if let Some(cfg) = CACHE.read().ok().and_then(|g| g.clone()) {
         return cfg;
     }
-    let cfg = load_uncached();
+    let mut cfg = load_uncached();
+    if seed_odoo_groups_if_empty(&mut cfg) {
+        let _ = save(&cfg);
+    }
     if let Ok(mut g) = CACHE.write() {
         *g = Some(cfg.clone());
     }
