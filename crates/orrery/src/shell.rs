@@ -3643,7 +3643,7 @@ impl OrreryApp {
                 })
             })
             .collect();
-        parents.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        parents.sort_by_key(|a| a.name.to_lowercase());
 
         let mut sec = div()
             .flex()
@@ -3772,6 +3772,7 @@ impl OrreryApp {
             let can_stage = p.unstaged > 0;
             let can_commit = p.dirty > 0;
             let can_push = p.ahead > 0;
+            let can_update_submodules = p.child_count > 0;
             let menu_id = pid2.clone();
             sec = sec.child(row.context_menu(move |menu, _w, cx| {
                 let st = app_ent.read(cx);
@@ -3784,6 +3785,7 @@ impl OrreryApp {
                     can_commit,
                     can_generate,
                     can_push,
+                    can_update_submodules,
                     st.selected.len(),
                     st.services.ai_ready,
                 )
@@ -3805,6 +3807,7 @@ impl OrreryApp {
                     let can_stage = c.unstaged > 0;
                     let can_commit = c.dirty > 0;
                     let can_push = c.ahead > 0;
+                    let can_update_submodules = c.child_count > 0;
                     let menu_id = c.id.clone();
                     let (cb_border, cb_bg) = if child_selected {
                         (t.primary, t.primary)
@@ -3863,6 +3866,7 @@ impl OrreryApp {
                                 can_commit,
                                 can_generate,
                                 can_push,
+                                can_update_submodules,
                                 st.selected.len(),
                                 st.services.ai_ready,
                             )
@@ -4150,9 +4154,7 @@ impl OrreryApp {
                 .child(lucide(icon_name, 14., fg))
                 .child(SharedString::from(label.to_string()));
             if active {
-                item = item
-                    .font_weight(FontWeight::MEDIUM)
-                    .bg(rgb(t.accent_wash));
+                item = item.font_weight(FontWeight::MEDIUM).bg(rgb(t.accent_wash));
             }
             let (n, urgent) = match view {
                 View::Grid => self.grid_badge(),
@@ -4180,7 +4182,10 @@ impl OrreryApp {
             .border_color(rgb(t.border))
             .text_color(rgb(t.fg2))
             .cursor_pointer()
-            .hover(|s| s.border_color(rgb(t.border_strong)).bg(rgb(t.surface_hover)))
+            .hover(|s| {
+                s.border_color(rgb(t.border_strong))
+                    .bg(rgb(t.surface_hover))
+            })
             .on_click(cx.listener(|this, _ev, window, cx| this.open_palette(window, cx)))
             .child(lucide("search", 14., t.fg2))
             .child(

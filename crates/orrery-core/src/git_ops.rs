@@ -1188,6 +1188,42 @@ pub fn commit_all(path: &str, message: &str) -> Result<String, String> {
     commit(path, message)
 }
 
+/// `git submodule update --init --recursive` for a parent repo.
+///
+/// Initializes missing checkouts and updates existing ones to the commit
+/// recorded in the parent. Returns a short summary; skips (via Err with a
+/// recognizable message callers map to Skip) when `.gitmodules` is absent.
+pub fn submodule_update(path: &str) -> Result<String, String> {
+    let root = std::path::Path::new(path);
+    if !root.join(".gitmodules").is_file() {
+        return Err("no submodules".into());
+    }
+    let declared = crate::scan::submodule_paths(root);
+    if declared.is_empty() {
+        return Err("no submodules".into());
+    }
+    let result = run_command(path, "git submodule update --init --recursive")?;
+    if !result.ok {
+        let detail = result.output_tail.trim();
+        return Err(if detail.is_empty() {
+            format!(
+                "submodule update failed{}",
+                result
+                    .code
+                    .map(|c| format!(" (exit {c})"))
+                    .unwrap_or_default()
+            )
+        } else {
+            detail.to_string()
+        });
+    }
+    let n = declared.len();
+    Ok(format!(
+        "updated {n} submodule{}",
+        if n == 1 { "" } else { "s" }
+    ))
+}
+
 /// Push the current branch to its upstream remote; with no upstream, push to
 /// `origin` and set the branch's upstream (`git push --set-upstream origin
 /// <branch>` semantics — `branch.<name>.remote` + `branch.<name>.merge` in
@@ -2010,6 +2046,74 @@ mod tests {
         assert!(
             staged_diff(&path).unwrap().is_empty(),
             "nothing staged after commit"
+        );
+    }
+
+    #[test]
+    fn submodule_update_skips_without_gitmodules() {
+        let (_dir, path) = init_repo();
+        assert_eq!(submodule_update(&path).unwrap_err(), "no submodules");
+    }
+
+    #[test]
+    fn submodule_update_skips_empty_gitmodules() {
+        let (dir, path) = init_repo();
+        // Present but no `path =` entries → still "no submodules".
+        fs::write(dir.path().join(".gitmodules"), "# empty\n").unwrap();
+        assert_eq!(submodule_update(&path).unwrap_err(), "no submodules");
+    }
+
+    #[test]
+    fn submodule_update_inits_declared_child() {
+        // Local path submodule: register via `git submodule add`, wipe the
+        // checkout, then `submodule_update` re-inits it. Newer git blocks the
+        // `file` transport by default — pass `-c protocol.file.allow=always`
+        // on add, and store the same in the parent repo so update inherits it.
+        let (_child_dir, child_path) = init_repo();
+        fs::write(std::path::Path::new(&child_path).join("lib.txt"), "lib").unwrap();
+        // Second commit so the submodule tip has a distinctive file.
+        let child_repo = Repository::open(&child_path).unwrap();
+        let mut index = child_repo.index().unwrap();
+        index.add_path(std::path::Path::new("lib.txt")).unwrap();
+        index.write().unwrap();
+        let tree = child_repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = child_repo.signature().unwrap();
+        let parent_commit = child_repo.head().unwrap().peel_to_commit().unwrap();
+        child_repo
+            .commit(Some("HEAD"), &sig, &sig, "lib", &tree, &[&parent_commit])
+            .unwrap();
+
+        let (_parent_dir, parent_path) = init_repo();
+        let allow = run_command(&parent_path, "git config protocol.file.allow always").unwrap();
+        assert!(allow.ok, "config failed: {}", allow.output_tail);
+        // `run_command` splits on whitespace, so pass `-c` via a direct spawn.
+        let add = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &child_path,
+                "vendor/lib",
+            ])
+            .current_dir(&parent_path)
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "submodule add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        // Drop the checkout so --init has work to do.
+        let checkout = std::path::Path::new(&parent_path).join("vendor/lib");
+        fs::remove_dir_all(&checkout).unwrap();
+        assert!(!checkout.join(".git").exists());
+
+        let msg = submodule_update(&parent_path).unwrap();
+        assert_eq!(msg, "updated 1 submodule");
+        assert!(
+            checkout.join("lib.txt").is_file(),
+            "child should be checked out after update --init"
         );
     }
 }

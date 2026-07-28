@@ -395,7 +395,11 @@ pub fn render(
                 .border_b_1()
                 .border_color(rgb(t.border))
                 .child(lucide("search", 15., t.fg2))
-                .child(div().flex_1().child(Input::new(&data.query).appearance(false))),
+                .child(
+                    div()
+                        .flex_1()
+                        .child(Input::new(&data.query).appearance(false)),
+                ),
         )
         .child(
             div()

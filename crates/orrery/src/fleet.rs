@@ -61,6 +61,8 @@ pub enum FleetOp {
     Pull,
     StageAll,
     Push,
+    /// `git submodule update --init --recursive` on each selected parent.
+    SubmoduleUpdate,
     /// Manual bulk commit — same user-typed message on every selected repo.
     /// Only started through the message strip ([`OrreryApp::confirm_fleet_commit`]).
     CommitAll,
@@ -82,6 +84,7 @@ impl FleetOp {
             FleetOp::Pull => "Pulling",
             FleetOp::StageAll => "Staging",
             FleetOp::Push => "Pushing",
+            FleetOp::SubmoduleUpdate => "Updating submodules",
             FleetOp::CommitAll => "Committing",
             FleetOp::GenerateAndCommit => "Generating",
             FleetOp::Prune => "Pruning",
@@ -96,6 +99,7 @@ impl FleetOp {
             FleetOp::Pull => "Pull",
             FleetOp::StageAll => "Stage all",
             FleetOp::Push => "Push",
+            FleetOp::SubmoduleUpdate => "Submodules",
             FleetOp::CommitAll => "Commit",
             FleetOp::GenerateAndCommit => "Generate & commit",
             FleetOp::Prune => "Prune",
@@ -383,6 +387,13 @@ impl OrreryApp {
                         FleetOp::Push => {
                             fleet::run(&repos, workers, &cancel, progress, fleet::push_op())
                         }
+                        FleetOp::SubmoduleUpdate => fleet::run(
+                            &repos,
+                            workers,
+                            &cancel,
+                            progress,
+                            fleet::submodule_update_op(),
+                        ),
                         FleetOp::CommitAll => {
                             let msg = commit_message.unwrap_or_default();
                             fleet::run(
@@ -816,6 +827,15 @@ impl OrreryApp {
                 false,
                 t,
                 cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::Push, cx)),
+            ))
+            .child(bar_btn(
+                "fleet-submodules",
+                "git-branch",
+                FleetOp::SubmoduleUpdate.label(),
+                idle,
+                false,
+                t,
+                cx.listener(|this, _e, _w, cx| this.run_fleet(FleetOp::SubmoduleUpdate, cx)),
             ))
             .child(bar_btn(
                 "fleet-prune",

@@ -22,9 +22,11 @@ const MONO: &str = "monospace";
 /// Shared right-click actions for a repo card, list row, or TREE row.
 ///
 /// Action visibility is gated by repo state (`can_stage` / `can_commit` /
-/// `can_push`) and by `can_generate` (`aiReady` ∧ dirty) so AI items stay
-/// hidden when the backend is unreachable. When the fleet selection is
-/// non-empty, also offers bulk Commit / Generate & commit over that set.
+/// `can_push` / `can_update_submodules`) and by `can_generate` (`aiReady` ∧
+/// dirty) so AI items stay hidden when the backend is unreachable. When the
+/// fleet selection is non-empty, also offers bulk Commit / Generate & commit
+/// over that set.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_repo_context_menu(
     menu: PopupMenu,
     app: Entity<OrreryApp>,
@@ -33,6 +35,7 @@ pub(crate) fn fill_repo_context_menu(
     can_commit: bool,
     can_generate: bool,
     can_push: bool,
+    can_update_submodules: bool,
     selection_n: usize,
     fleet_ai_ready: bool,
 ) -> PopupMenu {
@@ -100,8 +103,9 @@ pub(crate) fn fill_repo_context_menu(
         }));
     }
     let (a_f, id_f) = (app.clone(), repo_id.clone());
-    let (a_p, id_p) = (app, repo_id);
-    m.separator()
+    let (a_p, id_p) = (app.clone(), repo_id.clone());
+    m = m
+        .separator()
         .item(PopupMenuItem::new("Fetch").on_click(move |_, _, cx| {
             a_f.update(cx, |this, cx| {
                 this.run_fleet_repos(FleetOp::Fetch, vec![id_f.to_string()], cx);
@@ -111,7 +115,18 @@ pub(crate) fn fill_repo_context_menu(
             a_p.update(cx, |this, cx| {
                 this.run_fleet_repos(FleetOp::Pull, vec![id_p.to_string()], cx);
             });
-        }))
+        }));
+    if can_update_submodules {
+        let (a, id) = (app, repo_id);
+        m = m.item(
+            PopupMenuItem::new("Update submodules").on_click(move |_, _, cx| {
+                a.update(cx, |this, cx| {
+                    this.run_fleet_repos(FleetOp::SubmoduleUpdate, vec![id.to_string()], cx);
+                });
+            }),
+        );
+    }
+    m
 }
 
 /// Per-card interactive state, resolved by the caller inside the
@@ -536,6 +551,7 @@ pub fn card(
     let can_stage = row.unstaged > 0;
     let can_commit = row.dirty > 0;
     let can_push = row.ahead > 0;
+    let can_update_submodules = row.child_count > 0;
     div()
         .id(SharedString::from(format!("card-{idx}")))
         .group(group)
@@ -568,6 +584,7 @@ pub fn card(
                 can_commit,
                 can_generate,
                 can_push,
+                can_update_submodules,
                 selection_n,
                 fleet_ai,
             )
@@ -769,6 +786,7 @@ pub(crate) fn list_item(
     let can_stage = row.unstaged > 0;
     let can_commit = row.dirty > 0;
     let can_push = row.ahead > 0;
+    let can_update_submodules = row.child_count > 0;
     let mut shell = div()
         .id(SharedString::from(format!("lrow-{idx}")))
         .group(group)
@@ -795,6 +813,7 @@ pub(crate) fn list_item(
                 can_commit,
                 can_generate,
                 can_push,
+                can_update_submodules,
                 selection_n,
                 fleet_ai,
             )

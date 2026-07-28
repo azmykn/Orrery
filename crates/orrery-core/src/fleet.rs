@@ -214,6 +214,16 @@ pub fn push_op() -> impl Fn(&str) -> Outcome + Sync {
     }
 }
 
+/// `git submodule update --init --recursive` on each parent. Repos without a
+/// `.gitmodules` skip (not fail).
+pub fn submodule_update_op() -> impl Fn(&str) -> Outcome + Sync {
+    |path| match git_ops::submodule_update(path) {
+        Ok(s) => Outcome::Ok(s),
+        Err(e) if e == "no submodules" => Outcome::Skipped(e),
+        Err(e) => Outcome::Failed(e),
+    }
+}
+
 /// Fleet hard reset to `@{upstream}` (`git reset --hard origin/<branch>`).
 /// Destructive: discards local commits and dirty work. Skips (not fails) when
 /// there is no upstream / detached HEAD.
@@ -542,5 +552,14 @@ mod tests {
             .results
             .iter()
             .all(|r| matches!(&r.outcome, Outcome::Ok(s) if s.starts_with("fetched"))));
+    }
+
+    #[test]
+    fn submodule_update_op_skips_repos_without_submodules() {
+        let (_d, path) = init_repo();
+        assert_eq!(
+            submodule_update_op()(&path),
+            Outcome::Skipped("no submodules".into())
+        );
     }
 }

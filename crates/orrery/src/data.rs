@@ -26,6 +26,8 @@ pub struct Row {
     pub ahead: u32,
     pub behind: u32,
     pub dirty: u32,
+    /// Index vs HEAD count — kept for parity with `model::GitStatus` / future UI.
+    #[allow(dead_code)]
     pub staged: u32,
     pub unstaged: u32,
     pub stars: SharedString, // pre-formatted (e.g. "1.2k")
@@ -39,6 +41,7 @@ pub struct Row {
     /// Parent repo id when this row is a checked-out git submodule.
     pub parent_id: Option<SharedString>,
     /// Relative submodule path from `.gitmodules`, if any.
+    #[allow(dead_code)]
     pub submodule_path: Option<SharedString>,
     /// Number of discovered submodule children (parents only).
     pub child_count: u32,
