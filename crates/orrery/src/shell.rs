@@ -277,7 +277,7 @@ pub struct OrreryApp {
     pub ci_states: std::collections::HashMap<(String, String), orrery_core::cache::CiEntry>,
     /// The last whole-pass CI failure surfaced as a toast, so an ongoing
     /// outage (expired token polled every few minutes) toasts once per
-    /// distinct error, not per pass.
+    /// distinct error, not per pass. Soft Info — not a sticky Error.
     pub ci_last_error: Option<String>,
     /// The ranked "needs you" list from `orrery_core::attention::compute`
     /// (Urgent first). Recomputed on each source update — rescan, inbox load,
@@ -2289,6 +2289,41 @@ impl OrreryApp {
         .detach();
     }
 
+    /// Remove a workspace root by draft index: update draft + live config,
+    /// persist, toast, and rescan. No-op if the index is stale.
+    pub fn settings_remove_root(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(s) = &self.settings else { return };
+        if index >= s.draft.roots.len() {
+            return;
+        }
+        let removed = s.draft.roots[index].clone();
+        if let Some(s) = &mut self.settings {
+            s.draft.roots.remove(index);
+        }
+        let removed_exp = orrery_core::scan::expand(&removed);
+        self.config
+            .roots
+            .retain(|r| orrery_core::scan::expand(r) != removed_exp);
+        if let Err(e) = orrery_core::config::save(&self.config) {
+            self.push_toast(
+                ToastKind::Error,
+                "Save failed",
+                Some(e.to_string().into()),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.push_toast(
+            ToastKind::Success,
+            "Removed workspace root",
+            Some(removed.into()),
+            cx,
+        );
+        self.rescan(cx);
+        cx.notify();
+    }
+
     /// Append a typed workspace path to the draft + live config (smart detect),
     /// persist, toast, and rescan.
     pub fn settings_add_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2297,53 +2332,150 @@ impl OrreryApp {
         if val.is_empty() {
             return;
         }
-        // Dedupe against draft roots (what the user sees) and live config.
-        let existing: Vec<String> = self
+        let added = self.settings_add_root_paths(std::slice::from_ref(&val), cx);
+        if added > 0 {
+            let input = self.settings.as_ref().map(|s| s.add_root.clone());
+            if let Some(input) = input {
+                input.update(cx, |st, cx| st.set_value("", window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open the native multi-folder picker and append any selected roots.
+    pub fn settings_browse_roots(&mut self, cx: &mut Context<Self>) {
+        if self.settings.is_none() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async {
+                    orrery_platform::folder_picker::pick_folders("Add workspace roots", "Add")
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(paths) if paths.is_empty() => {}
+                    Ok(paths) => {
+                        let raws: Vec<String> = paths
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect();
+                        this.settings_add_root_paths(&raws, cx);
+                    }
+                    Err(e) => {
+                        this.push_toast(
+                            ToastKind::Error,
+                            "Folder picker unavailable",
+                            Some(e.into()),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Validate + append one or more workspace roots (typed or browsed).
+    /// Skips duplicates, persists once, toasts, and rescans when anything was
+    /// added. Returns how many roots were newly appended.
+    fn settings_add_root_paths(&mut self, raws: &[String], cx: &mut Context<Self>) -> usize {
+        if raws.is_empty() || self.settings.is_none() {
+            return 0;
+        }
+
+        let mut existing: Vec<String> = self
             .settings
             .as_ref()
             .map(|s| s.draft.roots.clone())
             .unwrap_or_else(|| self.config.roots.clone());
-        match Self::prepare_workspace_root(&val, &existing) {
-            Ok((store, is_repo)) => {
-                if let Some(s) = &mut self.settings {
-                    s.draft.roots.push(store.clone());
-                    s.saved = false;
-                    let input = s.add_root.clone();
-                    input.update(cx, |st, cx| st.set_value("", window, cx));
+
+        let mut added: Vec<(String, bool)> = Vec::new();
+        let mut first_err: Option<String> = None;
+        let mut skipped_dup = 0usize;
+
+        for raw in raws {
+            match Self::prepare_workspace_root(raw, &existing) {
+                Ok((store, is_repo)) => {
+                    existing.push(store.clone());
+                    added.push((store, is_repo));
                 }
-                if !self
-                    .config
-                    .roots
-                    .iter()
-                    .any(|r| orrery_core::scan::expand(r) == orrery_core::scan::expand(&store))
-                {
-                    self.config.roots.push(store.clone());
+                Err(msg) if msg == "That path is already configured." => {
+                    skipped_dup += 1;
                 }
-                if let Err(e) = orrery_core::config::save(&self.config) {
-                    self.push_toast(
-                        ToastKind::Error,
-                        "Save failed",
-                        Some(e.to_string().into()),
-                        cx,
-                    );
-                    return;
+                Err(msg) => {
+                    if first_err.is_none() {
+                        first_err = Some(msg);
+                    }
                 }
-                let (title, detail) = if is_repo {
-                    (
-                        "Added repo",
-                        format!("Scanning {store} as a single repository."),
-                    )
-                } else {
-                    ("Added scan root", format!("Scanning repos under {store}."))
-                };
-                self.push_toast(ToastKind::Success, title, Some(detail.into()), cx);
-                self.rescan(cx);
-            }
-            Err(msg) => {
-                self.push_toast(ToastKind::Error, "Could not add path", Some(msg.into()), cx);
             }
         }
-        cx.notify();
+
+        if added.is_empty() {
+            if let Some(msg) = first_err {
+                self.push_toast(ToastKind::Error, "Could not add path", Some(msg.into()), cx);
+            } else if skipped_dup > 0 {
+                self.push_toast(
+                    ToastKind::Info,
+                    "Already configured",
+                    Some("Those folders are already in your workspace roots.".into()),
+                    cx,
+                );
+            }
+            return 0;
+        }
+
+        for (store, _) in &added {
+            if let Some(s) = &mut self.settings {
+                s.draft.roots.push(store.clone());
+                s.saved = false;
+            }
+            if !self
+                .config
+                .roots
+                .iter()
+                .any(|r| orrery_core::scan::expand(r) == orrery_core::scan::expand(store))
+            {
+                self.config.roots.push(store.clone());
+            }
+        }
+
+        if let Err(e) = orrery_core::config::save(&self.config) {
+            self.push_toast(
+                ToastKind::Error,
+                "Save failed",
+                Some(e.to_string().into()),
+                cx,
+            );
+            return 0;
+        }
+
+        let n = added.len();
+        let (title, detail) = if n == 1 {
+            let (store, is_repo) = &added[0];
+            if *is_repo {
+                (
+                    "Added repo",
+                    format!("Scanning {store} as a single repository."),
+                )
+            } else {
+                ("Added scan root", format!("Scanning repos under {store}."))
+            }
+        } else {
+            (
+                "Added workspace roots",
+                format!("Added {n} folders; scanning…"),
+            )
+        };
+        self.push_toast(ToastKind::Success, title, Some(detail.into()), cx);
+        if let Some(msg) = first_err {
+            self.push_toast(ToastKind::Info, "Some paths skipped", Some(msg.into()), cx);
+        }
+        self.rescan(cx);
+        n
     }
 
     /// Read the field inputs into the draft, persist it, and rescan.
@@ -4020,10 +4152,11 @@ impl OrreryApp {
     /// calling this on every rescan and attention poll is cheap.
     ///
     /// A pass where *everything* failed (expired token, rate limit, outage)
-    /// surfaces one error toast per distinct error — the cached states are
+    /// surfaces one soft Info toast per distinct error — the cached states are
     /// deliberately left untouched (see `orrery_core::ci`), so this toast is
-    /// the only way an auth problem becomes visible instead of CI silently
-    /// going stale.
+    /// still how an auth/permission problem becomes visible, but as a quiet
+    /// auto-dismissing notice rather than a sticky red Error that stacks on
+    /// top of unrelated fleet successes (e.g. Pull ok + CI 403).
     pub fn refresh_ci(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let now = crate::data::now_unix();
@@ -4043,8 +4176,8 @@ impl OrreryApp {
                     {
                         this.upsert_toast(
                             "ci-pass",
-                            ToastKind::Error,
-                            "CI status check failed",
+                            ToastKind::Info,
+                            "Couldn't refresh CI status",
                             Some(err.clone().into()),
                             cx,
                         );

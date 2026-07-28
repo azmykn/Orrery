@@ -233,6 +233,13 @@ fn account_section(
                 t.clean,
                 t,
             ))
+            .child(note_line(
+                SharedString::from(
+                    "Powers Inbox, Explore, PR actions, and CI badges. Pull/Push still use your git credentials (SSH or credential helper), not this link. Org remotes may need SSO authorization for the Orrery app; CI needs Actions read (`repo` on classic tokens).",
+                ),
+                t.fg3,
+                t,
+            ))
             .child(div().child(button("Sign out", t, {
                 let app = app.clone();
                 move |cx| {
@@ -243,7 +250,14 @@ fn account_section(
         col = col
             .child(status_row(
                 "circle-alert",
-                "Not connected — sign in to use Inbox, Feed, Explore and PR actions.",
+                "Not connected — sign in to use Inbox, Feed, Explore, PR actions, and CI.",
+                t.fg3,
+                t,
+            ))
+            .child(note_line(
+                SharedString::from(
+                    "Sign-in requests read:user + repo (private repos and Actions/CI).",
+                ),
                 t.fg3,
                 t,
             ))
@@ -268,13 +282,26 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
             .child("A single git repo or a folder of repos."),
     );
     for (i, root) in s.draft.roots.iter().enumerate() {
-        let remove = icon_btn("x", t, app, move |a| {
-            if let Some(s) = &mut a.settings
-                && i < s.draft.roots.len()
-            {
-                s.draft.roots.remove(i);
-            }
-        });
+        // Element ids must be unique — every row used to share `ib-x`, so GPUI
+        // dropped/misrouted clicks and × appeared dead.
+        let remove = {
+            let app = app.clone();
+            let (hb, _) = (t.surface_hover, t.fg3);
+            div()
+                .id(SharedString::from(format!("ib-x-root-{i}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(24.))
+                .h(px(24.))
+                .rounded(px(t.r_xs))
+                .cursor_pointer()
+                .hover(move |s| s.bg(rgb(hb)))
+                .child(lucide("x", 13., t.fg3))
+                .on_click(move |_ev, _win, cx| {
+                    app.update(cx, |this, cx| this.settings_remove_root(i, cx));
+                })
+        };
         col = col.child(
             div()
                 .flex()
@@ -295,7 +322,27 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
                 .child(remove),
         );
     }
-    // Add a path (smart: single repo vs scan folder).
+    // Browse (native multi-folder picker) + typed path Add (fallback / paste).
+    let browse = {
+        let app = app.clone();
+        let (hb, hf) = (t.border_strong, t.fg0);
+        div()
+            .id("btn-Browse-roots")
+            .px(px(14.))
+            .py(px(7.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(t.button_bg))
+            .border_1()
+            .border_color(rgb(t.border))
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(t.fg1))
+            .cursor_pointer()
+            .hover(move |s| s.border_color(rgb(hb)).text_color(rgb(hf)))
+            .child("Browse…")
+            .on_click(move |_ev, _window, cx| {
+                app.update(cx, |this, cx| this.settings_browse_roots(cx));
+            })
+    };
     let add = {
         let app = app.clone();
         let (hb, hf) = (t.border_strong, t.fg0);
@@ -323,6 +370,7 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
             .items_center()
             .gap(px(8.))
             .child(div().flex_1().min_w(px(0.)).child(Input::new(&s.add_root)))
+            .child(browse)
             .child(add),
     );
 
@@ -899,32 +947,6 @@ fn number_row(label: &str, input: &Entity<InputState>, t: &Theme) -> impl IntoEl
                 .child(SharedString::from(label.to_string())),
         )
         .child(div().w(px(120.)).child(NumberInput::new(input)))
-}
-
-fn icon_btn(
-    icon: &str,
-    t: &Theme,
-    app: &Entity<OrreryApp>,
-    on: impl Fn(&mut OrreryApp) + 'static,
-) -> impl IntoElement {
-    let app = app.clone();
-    div()
-        .id(SharedString::from(format!("ib-{icon}")))
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(24.))
-        .h(px(24.))
-        .rounded(px(t.r_xs))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(t.surface_hover)))
-        .child(lucide(icon, 13., t.fg3))
-        .on_click(move |_ev, _win, cx| {
-            app.update(cx, |this, cx| {
-                on(this);
-                cx.notify();
-            });
-        })
 }
 
 fn button(label: &str, t: &Theme, on: impl Fn(&mut gpui::App) + 'static) -> impl IntoElement {

@@ -10,8 +10,9 @@
 //! events on its worker threads; they're bridged over an `async-channel`
 //! drained by one foreground task (the `live.rs` pattern) that keeps a keyed
 //! Progress toast ("Pulling 12/40…") current. The completion resolves that
-//! toast to an aggregate summary — Error with per-repo reasons when anything
-//! failed, so a 40-repo pull never fails silently — then rescans once so the
+//! toast to an aggregate summary — "Pull succeeded" / "Pull failed" with
+//! per-repo detail, Error (persists until clicked) when anything failed so a
+//! 40-repo pull never fails silently — then rescans once so the
 //! grid reflects the new state.
 //!
 //! Bulk **Prune** is confirm-gated (branch deletion is irreversible — the #173
@@ -418,8 +419,8 @@ impl OrreryApp {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.fleet_run = None;
-                let (kind, title) = summary(op, &report);
-                this.upsert_toast(key, kind, title, failure_detail(&report), cx);
+                let (kind, title, detail) = resolve_toast(op, &report);
+                this.upsert_toast(key, kind, title, detail, cx);
                 // One rescan for the whole run (not per repo) so the grid
                 // reflects the new ahead/behind/dirty state.
                 this.rescan(cx);
@@ -1145,15 +1146,42 @@ fn bar_btn(
     b.into_any_element()
 }
 
-/// Aggregate summary for the resolution toast, e.g. "Pull: 38 ok, 2 failed".
-/// Any failure resolves as an Error toast (persists until clicked) so failed
-/// repos are never silently swept away; clean runs are a Success.
-fn summary(op: FleetOp, report: &FleetReport) -> (ToastKind, String) {
+/// Kind + title + detail for the fleet resolution toast.
+///
+/// Titles read as outcomes ("Pull succeeded" / "Pull failed"), not bare
+/// counters ("Pull: 1 ok") — success details name the repo and git outcome
+/// (e.g. "up to date"); any failure is an Error toast that persists until
+/// clicked so failed repos are never silently swept away.
+fn resolve_toast(op: FleetOp, report: &FleetReport) -> (ToastKind, String, Option<SharedString>) {
     let (ok, failed, skipped) = (
         report.ok_count(),
         report.failed_count(),
         report.skipped_count(),
     );
+    let kind = if failed > 0 {
+        ToastKind::Error
+    } else {
+        ToastKind::Success
+    };
+    let title = if report.cancelled {
+        format!("{} cancelled", op.label())
+    } else if failed > 0 && ok == 0 {
+        format!("{} failed", op.label())
+    } else if failed > 0 {
+        format!("{} finished with errors", op.label())
+    } else {
+        format!("{} succeeded", op.label())
+    };
+    let detail = if failed > 0 {
+        failure_detail(report)
+    } else {
+        success_detail(report, ok, skipped)
+    };
+    (kind, title, detail)
+}
+
+/// Count line for cancelled / multi-repo success toasts, e.g. "2 ok, 1 skipped".
+fn count_line(ok: usize, failed: usize, skipped: usize) -> String {
     let mut parts = vec![format!("{ok} ok")];
     if failed > 0 {
         parts.push(format!("{failed} failed"));
@@ -1161,16 +1189,50 @@ fn summary(op: FleetOp, report: &FleetReport) -> (ToastKind, String) {
     if skipped > 0 {
         parts.push(format!("{skipped} skipped"));
     }
-    let cancelled = if report.cancelled { " cancelled" } else { "" };
-    let kind = if failed > 0 {
-        ToastKind::Error
-    } else {
-        ToastKind::Success
-    };
-    (
-        kind,
-        format!("{}{cancelled}: {}", op.label(), parts.join(", ")),
-    )
+    parts.join(", ")
+}
+
+/// Success-path detail: per-repo git outcome when there are few, else a count
+/// summary. Prefers the engine's short messages ("up to date",
+/// "fast-forwarded 3") so Pull/Fetch results are unambiguous.
+fn success_detail(report: &FleetReport, ok: usize, skipped: usize) -> Option<SharedString> {
+    if report.cancelled {
+        return Some(count_line(ok, 0, skipped).into());
+    }
+    let named: Vec<String> = report
+        .results
+        .iter()
+        .filter_map(|r| {
+            let name = r.repo.rsplit('/').next().unwrap_or(&r.repo);
+            match &r.outcome {
+                Outcome::Ok(msg) if !msg.is_empty() => {
+                    let msg = if msg == "up to date" {
+                        "already up to date"
+                    } else {
+                        msg.as_str()
+                    };
+                    Some(format!(
+                        "{name}: {}",
+                        clip(&crate::data::oneline(msg.to_string()), MAX_REASON_CHARS)
+                    ))
+                }
+                Outcome::Ok(_) => Some(name.to_string()),
+                Outcome::Skipped(why) => Some(format!(
+                    "{name}: skipped ({})",
+                    clip(&crate::data::oneline(why.clone()), MAX_REASON_CHARS)
+                )),
+                Outcome::Failed(_) => None,
+            }
+        })
+        .collect();
+    if named.is_empty() {
+        return None;
+    }
+    if named.len() <= MAX_FAILURES_SHOWN {
+        return Some(named.join(" · ").into());
+    }
+    // Large fleets: keep the toast short — counts are enough.
+    Some(count_line(ok, 0, skipped).into())
 }
 
 /// Failed repos + reasons for the toast detail, e.g.
@@ -1289,14 +1351,21 @@ mod tests {
             ],
             false,
         );
-        let (kind, title) = summary(FleetOp::Pull, &r);
+        let (kind, title, detail) = resolve_toast(FleetOp::Pull, &r);
         assert!(kind == ToastKind::Error);
-        assert_eq!(title, "Pull: 1 ok, 1 failed, 1 skipped");
+        assert_eq!(title, "Pull finished with errors");
+        assert_eq!(detail.as_deref(), Some("b: boom"));
 
-        let clean = report(vec![("/x/a", Outcome::Ok("done".into()))], false);
-        let (kind, title) = summary(FleetOp::Fetch, &clean);
+        let clean = report(vec![("/x/a", Outcome::Ok("up to date".into()))], false);
+        let (kind, title, detail) = resolve_toast(FleetOp::Fetch, &clean);
         assert!(kind == ToastKind::Success);
-        assert_eq!(title, "Fetch: 1 ok");
+        assert_eq!(title, "Fetch succeeded");
+        assert_eq!(detail.as_deref(), Some("a: already up to date"));
+
+        let all_fail = report(vec![("/x/b", Outcome::Failed("boom".into()))], false);
+        let (kind, title, _) = resolve_toast(FleetOp::Pull, &all_fail);
+        assert!(kind == ToastKind::Error);
+        assert_eq!(title, "Pull failed");
     }
 
     #[test]
@@ -1308,8 +1377,9 @@ mod tests {
             ],
             true,
         );
-        let (_, title) = summary(FleetOp::Pull, &r);
-        assert_eq!(title, "Pull cancelled: 1 ok, 1 skipped");
+        let (_, title, detail) = resolve_toast(FleetOp::Pull, &r);
+        assert_eq!(title, "Pull cancelled");
+        assert_eq!(detail.as_deref(), Some("1 ok, 1 skipped"));
     }
 
     #[test]
@@ -1351,9 +1421,13 @@ mod tests {
             ],
             false,
         );
-        let (kind, title) = summary(FleetOp::Prune, &r);
+        let (kind, title, detail) = resolve_toast(FleetOp::Prune, &r);
         assert!(kind == ToastKind::Success);
-        assert_eq!(title, "Prune: 1 ok, 1 skipped");
+        assert_eq!(title, "Prune succeeded");
+        assert_eq!(
+            detail.as_deref(),
+            Some("a: pruned 3 branches · b: skipped (nothing prunable)")
+        );
     }
 
     #[test]

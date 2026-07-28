@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 const DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 // `repo` (not just `public_repo`) so enrichment can read private repos — needed
-// for the public/private filter and the lock badge to work on private repos.
+// for the public/private filter and the lock badge — and so the Actions
+// workflow-runs endpoint used by the CI pass can read private-repo CI.
+// Classic OAuth with `repo` covers Actions; a fine-grained PAT used via
+// `$ORRERY_GITHUB_TOKEN` / `gh` still needs an explicit Actions: Read grant.
 const SCOPE: &str = "read:user repo";
 
 /// Built-in OAuth app client id for the device flow, so sign-in works out of the

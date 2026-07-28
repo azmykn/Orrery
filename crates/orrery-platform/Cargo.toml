@@ -28,7 +28,7 @@ png = "0.18"             # decode the tray glyph PNGs to ARGB for the SNI pixmap
 # Global-shortcut portal (Wayland-native summon hotkey). async-io backend (NOT
 # the default "tokio", which would force zbus/tokio and panic gpui's async-io
 # zbus connections — same constraint as the tray).
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts"] }
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "global_shortcuts", "file_chooser"] }
 
 [dev-dependencies]
 tempfile = "3"           # watcher target-computation tests

@@ -547,17 +547,30 @@ mod tests {
     fn ci_errors_surface_auth_and_rate_limit_but_not_missing_repo() {
         use reqwest::StatusCode;
         // 404 = repo not visible to this token — genuinely nothing to show.
-        assert_eq!(ci_error_for_status(StatusCode::NOT_FOUND), None);
-        // Expired/revoked token, rate limit, and server errors must be errors,
-        // not a silent "none" that blanks CI across the grid.
-        for status in [
-            StatusCode::UNAUTHORIZED,
-            StatusCode::FORBIDDEN,
-            StatusCode::TOO_MANY_REQUESTS,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::BAD_GATEWAY,
-        ] {
-            let err = ci_error_for_status(status).expect("must surface an error");
+        assert_eq!(ci_error_for_status(StatusCode::NOT_FOUND, None, None), None);
+        // Expired/revoked token, permission 403, rate limit, and server errors
+        // must be errors — not a silent "none" that blanks CI across the grid.
+        let unauthorized = ci_error_for_status(StatusCode::UNAUTHORIZED, None, None).expect("401");
+        assert!(unauthorized.contains("401"), "{unauthorized}");
+        assert!(unauthorized.contains("reconnect"), "{unauthorized}");
+
+        let forbidden = ci_error_for_status(StatusCode::FORBIDDEN, Some("42"), None).expect("403");
+        assert!(forbidden.contains("403"), "{forbidden}");
+        assert!(
+            forbidden.contains("Actions") || forbidden.contains("SSO"),
+            "{forbidden}"
+        );
+
+        // 403 with remaining=0 is GitHub's rate-limit shape, not a scope issue.
+        let rate_via_403 =
+            ci_error_for_status(StatusCode::FORBIDDEN, Some("0"), None).expect("rate");
+        assert!(rate_via_403.contains("rate limited"), "{rate_via_403}");
+
+        let rate_429 = ci_error_for_status(StatusCode::TOO_MANY_REQUESTS, None, None).expect("429");
+        assert!(rate_429.contains("rate limited"), "{rate_429}");
+
+        for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_GATEWAY] {
+            let err = ci_error_for_status(status, None, None).expect("must surface");
             assert!(err.contains(status.as_str()), "{err}");
         }
     }
@@ -1136,9 +1149,14 @@ pub async fn github_approve_pr(slug: &str, number: u64) -> Result<(), String> {
 /// "No CI" (`state: "none"`) is only reported when GitHub answers
 /// definitively: a 2xx with an empty run list, or a 404 (the repo isn't
 /// visible to this token — deleted, renamed, or private without access — so
-/// there is nothing to show). Auth failures (401 expired token), rate limits
-/// (403/429), and server errors surface as `Err` — same rule as `gh_search`
-/// above — so a broken token reads as an error, not as CI vanishing.
+/// there is nothing to show). Auth failures (401 expired token), permission
+/// denials (403 without a depleted rate-limit header), rate limits (429 or
+/// 403 + `x-ratelimit-remaining: 0`), and server errors surface as `Err` —
+/// same rule as `gh_search` above — so a broken token reads as an error, not
+/// as CI vanishing. A linked account is not enough by itself: the token still
+/// needs Actions read access (`repo` on classic OAuth/PAT, or Actions:read on
+/// a fine-grained PAT) and org SSO authorization when the remote is under an
+/// org that requires it.
 pub async fn github_ci(slug: &str, branch: Option<&str>) -> Result<CiStatus, String> {
     #[derive(Deserialize)]
     struct Runs {
@@ -1172,7 +1190,22 @@ pub async fn github_ci(slug: &str, branch: Option<&str>) -> Result<CiStatus, Str
         .map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {
-        if let Some(err) = ci_error_for_status(status) {
+        // Peek rate-limit headers before consuming the body — GitHub often
+        // answers a depleted quota with 403 + remaining=0, which must not be
+        // misread as a missing Actions permission.
+        let rate_remaining = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body_msg = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_owned));
+        if let Some(err) =
+            ci_error_for_status(status, rate_remaining.as_deref(), body_msg.as_deref())
+        {
             return Err(err);
         }
         return Ok(CiStatus {
@@ -1194,10 +1227,38 @@ pub async fn github_ci(slug: &str, branch: Option<&str>) -> Result<CiStatus, Str
 
 /// How a non-2xx from the workflow-runs endpoint is treated: 404 means the
 /// repo isn't visible with this token (deleted/renamed/no access) — genuinely
-/// no CI to show, so `None`. Anything else (401 expired token, 403 rate
-/// limit, 5xx) is a transport/auth failure the caller must see.
-fn ci_error_for_status(status: reqwest::StatusCode) -> Option<String> {
-    (status != reqwest::StatusCode::NOT_FOUND).then(|| format!("GitHub CI {status}"))
+/// no CI to show, so `None`. Auth/permission problems, rate limits, and 5xx
+/// are transport failures the caller must see (with an actionable hint when
+/// we can tell permission 403 apart from a depleted rate limit).
+fn ci_error_for_status(
+    status: reqwest::StatusCode,
+    rate_remaining: Option<&str>,
+    body_msg: Option<&str>,
+) -> Option<String> {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return None;
+    }
+    let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || (status == reqwest::StatusCode::FORBIDDEN && rate_remaining == Some("0"));
+    if rate_limited {
+        return Some("GitHub CI rate limited — try again later".into());
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Some("GitHub CI 401 — reconnect GitHub in Settings".into());
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        // Linked ≠ authorized for Actions: org SSO, blocked OAuth app, stale
+        // token without `repo`, or a fine-grained PAT missing Actions:read.
+        // Prefer a short actionable hint over GitHub's varying body text.
+        return Some(
+            "GitHub CI 403 — can't read Actions (reconnect in Settings, authorize org SSO, or grant Actions:read on a PAT)"
+                .into(),
+        );
+    }
+    if let Some(msg) = body_msg.filter(|m| !m.is_empty()) {
+        return Some(format!("GitHub CI {status}: {msg}"));
+    }
+    Some(format!("GitHub CI {status}"))
 }
 
 /// Map a workflow run's REST (status, conclusion) to our four-state vocabulary.
