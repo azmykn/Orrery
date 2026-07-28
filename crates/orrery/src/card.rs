@@ -9,6 +9,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement, Styled, Window, div, px, rgb,
 };
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
+use orrery_core::attention::Severity;
 use orrery_core::{cache, launch};
 
 use crate::data::Row;
@@ -130,8 +131,9 @@ pub(crate) fn fill_repo_context_menu(
 }
 
 /// Per-card interactive state, resolved by the caller inside the
-/// `uniform_list` render closure (cheap per-row lookups by id — no allocation).
-#[derive(Clone, Copy)]
+/// `uniform_list` render closure (cheap per-row lookups by id — no allocation
+/// beyond the small reason-chip vec).
+#[derive(Clone)]
 pub struct CardState {
     /// A live agent session is running in this repo.
     pub active: bool,
@@ -142,6 +144,12 @@ pub struct CardState {
     /// Any selection exists — keeps every card's checkbox visible (not just
     /// hover-revealed) while a selection is being built.
     pub selecting: bool,
+    /// Top attention reasons (urgent-first, kind-deduped) for chip labels.
+    pub reason_chips: Vec<(SharedString, Severity)>,
+    /// Extra unique reasons beyond `reason_chips` (renders as "+N").
+    pub reasons_more: usize,
+    /// Optional glance line under the path (top item summary · branch detail).
+    pub reason_subtitle: Option<SharedString>,
 }
 
 /// The fleet multi-select checkbox: filled with a check when selected;
@@ -152,12 +160,13 @@ fn select_box(
     id: SharedString,
     group: SharedString,
     row_id: SharedString,
-    state: CardState,
+    selected: bool,
+    selecting: bool,
     t: &Theme,
     app: &Entity<OrreryApp>,
 ) -> impl IntoElement {
     let app = app.clone();
-    let (border_c, bg_c) = if state.selected {
+    let (border_c, bg_c) = if selected {
         (t.primary, t.primary)
     } else {
         (t.border_strong, t.button_bg)
@@ -183,9 +192,9 @@ fn select_box(
             let row_id = row_id.clone();
             app.update(cx, |this, cx| this.toggle_selected(row_id, cx));
         });
-    if state.selected {
+    if selected {
         b = b.child(lucide("check", 12., t.page));
-    } else if !state.selecting {
+    } else if !selecting {
         b = b.invisible().group_hover(group, |s| s.visible());
     }
     b
@@ -227,9 +236,83 @@ pub(crate) fn lang_mark(language: &str, t: &Theme) -> gpui::AnyElement {
 }
 
 /// The urgent-attention mark: a small flat dot in the danger token, shown
-/// with the git status indicators when the repo has an Urgent item.
+/// with the git status indicators when the repo has an Urgent item and no
+/// reason chips (chips already tint urgency).
 fn urgent_dot(t: &Theme) -> impl IntoElement {
     div().w(px(8.)).h(px(8.)).rounded_full().bg(rgb(t.behind))
+}
+
+/// Severity → (bg, fg) for a flat attention-reason chip.
+fn reason_chip_colors(severity: Severity, t: &Theme) -> (u32, u32) {
+    match severity {
+        Severity::Urgent => (t.danger_badge, t.behind),
+        Severity::Attention => (t.button_bg, t.dirty),
+        Severity::Info => (t.button_bg, t.fg2),
+    }
+}
+
+/// One flat reason chip ("CI failing", "Not pushed", …).
+fn reason_chip(label: SharedString, severity: Severity, t: &Theme) -> impl IntoElement {
+    let (bg, fg) = reason_chip_colors(severity, t);
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(t.r_xs))
+        .bg(rgb(bg))
+        .border_1()
+        .border_color(rgb(if severity == Severity::Urgent {
+            t.behind
+        } else {
+            t.border
+        }))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(fg))
+        .child(label)
+}
+
+/// "+N" overflow chip when a repo has more unique reasons than we show.
+fn reason_more_chip(n: usize, t: &Theme) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .px(px(5.))
+        .py(px(1.))
+        .rounded(px(t.r_xs))
+        .bg(rgb(t.button_bg))
+        .border_1()
+        .border_color(rgb(t.border))
+        .font_family(MONO)
+        .text_size(px(t.text_data_sm))
+        .text_color(rgb(t.fg2))
+        .child(SharedString::from(format!("+{n}")))
+}
+
+/// Leading status-row segment: reason chips (and optional urgent dot fallback).
+fn attention_marks(state: &CardState, t: &Theme) -> impl IntoElement {
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .flex_none();
+    if state.reason_chips.is_empty() {
+        if state.urgent {
+            row = row.child(urgent_dot(t));
+        }
+    } else {
+        for (label, severity) in &state.reason_chips {
+            row = row.child(reason_chip(label.clone(), *severity, t));
+        }
+        if state.reasons_more > 0 {
+            row = row.child(reason_more_chip(state.reasons_more, t));
+        }
+    }
+    row
 }
 
 /// One status segment: a lucide icon + label, both in `color`.
@@ -337,7 +420,8 @@ pub fn card(
                     SharedString::from(format!("sel-{idx}")),
                     group.clone(),
                     row.id.clone(),
-                    state,
+                    state.selected,
+                    state.selecting,
                     t,
                     app,
                 ))
@@ -363,19 +447,33 @@ pub fn card(
         )
         .child(fav_star);
 
-    // ── slug · path ───────────────────────────────────────────────────────
-    let slug = div()
+    // ── slug · path (+ optional attention subtitle) ───────────────────────
+    let slug_line = div()
         .mt(px(6.))
         .truncate()
         .font_family(MONO)
         .text_size(px(t.text_data_sm))
         .text_color(rgb(t.fg2))
         .child(SharedString::from(format!("{} · {}", row.slug, row.path)));
+    let has_reason_sub = state.reason_subtitle.is_some();
+    let slug_block = if let Some(sub) = &state.reason_subtitle {
+        div().flex().flex_col().gap(px(2.)).child(slug_line).child(
+            div()
+                .truncate()
+                .font_family(MONO)
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(if state.urgent { t.behind } else { t.dirty }))
+                .child(sub.clone()),
+        )
+    } else {
+        div().child(slug_line)
+    };
 
-    // ── description (2-line clamp ≈ 38px) ────────────────────────────────
+    // ── description (2-line clamp ≈ 38px; shorter when a reason subtitle
+    //    is present so the fixed card height still fits the launcher row) ─
     let desc = div()
         .mt(px(9.))
-        .h(px(38.))
+        .h(px(if has_reason_sub { 22. } else { 38. }))
         .overflow_hidden()
         .text_size(px(t.text_small))
         .line_height(px(19.))
@@ -392,10 +490,8 @@ pub fn card(
         .mt(px(12.))
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
-    // Urgent attention (failing CI / review request) leads the status row.
-    if state.urgent {
-        status = status.child(urgent_dot(t));
-    }
+    // Attention reason chips (or urgent dot fallback) lead the status row.
+    status = status.child(attention_marks(&state, t));
     status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
     if row.ahead > 0 || row.behind > 0 {
         let color = if row.behind > 0 { t.behind } else { t.clean };
@@ -521,7 +617,7 @@ pub fn card(
         .cursor_pointer()
         .on_click(open_or_select(app, &row.id))
         .child(head)
-        .child(slug)
+        .child(slug_block)
         .child(desc);
 
     // AI summary, when present, sits between description and status.
@@ -610,7 +706,8 @@ pub(crate) fn list_item(
         SharedString::from(format!("lsel-{idx}")),
         group.clone(),
         row.id.clone(),
-        state,
+        state.selected,
+        state.selecting,
         t,
         app,
     );
@@ -638,7 +735,36 @@ pub(crate) fn list_item(
             })
     };
 
-    // Name + slug·path; clicking opens the drawer (Ctrl+click selects).
+    // Name + slug·path (+ optional attention subtitle); click opens drawer.
+    let name_col = {
+        let mut col = div().flex().flex_col().min_w(px(0.)).child(
+            div()
+                .truncate()
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(px(t.text_small))
+                .text_color(rgb(t.fg0))
+                .child(row.name.clone()),
+        );
+        col = col.child(
+            div()
+                .truncate()
+                .font_family(MONO)
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg2))
+                .child(SharedString::from(format!("{} · {}", row.slug, row.path))),
+        );
+        if let Some(sub) = &state.reason_subtitle {
+            col = col.child(
+                div()
+                    .truncate()
+                    .font_family(MONO)
+                    .text_size(px(t.text_data_sm))
+                    .text_color(rgb(if state.urgent { t.behind } else { t.dirty }))
+                    .child(sub.clone()),
+            );
+        }
+        col
+    };
     let open = {
         div()
             .id(SharedString::from(format!("lopen-{idx}")))
@@ -651,28 +777,7 @@ pub(crate) fn list_item(
             .cursor_pointer()
             .on_click(open_or_select(app, &row.id))
             .child(lang_mark(&row.language, t))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w(px(0.))
-                    .child(
-                        div()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_size(px(t.text_small))
-                            .text_color(rgb(t.fg0))
-                            .child(row.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .font_family(MONO)
-                            .text_size(px(t.text_data_sm))
-                            .text_color(rgb(t.fg2))
-                            .child(SharedString::from(format!("{} · {}", row.slug, row.path))),
-                    ),
-            )
+            .child(name_col)
             // Live agent session running in this repo.
             .children(
                 state
@@ -681,7 +786,7 @@ pub(crate) fn list_item(
             )
     };
 
-    // Status segments (branch / ahead-behind / dirty / stars / age).
+    // Status segments (attention reasons / branch / ahead-behind / dirty / …).
     let mut status = div()
         .flex()
         .flex_row()
@@ -690,10 +795,7 @@ pub(crate) fn list_item(
         .flex_none()
         .font_family(MONO)
         .text_size(px(t.text_data_sm));
-    // Urgent attention (failing CI / review request) leads the status row.
-    if state.urgent {
-        status = status.child(urgent_dot(t));
-    }
+    status = status.child(attention_marks(&state, t));
     status = status.child(seg("git-branch", row.branch.clone(), t.fg2));
     if row.ahead > 0 || row.behind > 0 {
         let color = if row.behind > 0 { t.behind } else { t.clean };
@@ -795,7 +897,7 @@ pub(crate) fn list_item(
         .items_center()
         .gap(px(14.))
         .w_full()
-        .h(px(60.))
+        .h(px(72.))
         .px(px(16.))
         .border_b_1()
         .border_color(rgb(t.border))

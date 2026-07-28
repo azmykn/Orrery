@@ -35,9 +35,26 @@ pnpm-debug.log*
 *.sqlite3
 /models
 
+# Secrets / local credentials (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+*credentials*
+*github_token*
+.github_token
+github_disconnected
+**/github_disconnected
+
 # Bundled llama-server runtime — fetched by CI into packaging/llama-runtime/ for
 # the AppImage build, never committed.
 /packaging/llama-runtime/
 
 # Cate IDE local workspace state (machine-specific layout)
 .cate/
+
+# Editor / agent local state (machine-specific; never publish)
+.cursor/
+.claude/
+.codex/
+agent-transcripts/

@@ -95,7 +95,7 @@ impl SettingsState {
             llama_url: field(window, cx, "https://…/model.gguf", ""),
             client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
             ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
-            add_root: field(window, cx, "~/Orrery or ~/odoo/odoo19", ""),
+            add_root: field(window, cx, "~/Projects or ~/code/my-app", ""),
             scan_depth: cx.new(|cx| {
                 InputState::new(window, cx)
                     .default_value(cfg.scan_depth.to_string())

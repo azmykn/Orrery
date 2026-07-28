@@ -17,7 +17,7 @@ use crate::model::{Host, Repo};
 /// What kind of thing needs attention. Extensible: append new variants (the
 /// declaration order is the within-severity sort order, so append where the
 /// new kind should rank among its severity peers).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AttentionKind {
     /// The latest default-branch CI run failed.
@@ -81,6 +81,23 @@ impl AttentionKind {
             | AttentionKind::PrAssigned
             | AttentionKind::PrunableBranches
             | AttentionKind::AgentRunning => Severity::Info,
+        }
+    }
+
+    /// Short chip label for Mission Control / cards. Stable English vocabulary
+    /// shared with drawer CI copy ("CI failing") and Settings notification
+    /// toggles ("Review requested", "Agent finished").
+    pub fn label(self) -> &'static str {
+        match self {
+            AttentionKind::CiFailing => "CI failing",
+            AttentionKind::ReviewRequested => "Review requested",
+            AttentionKind::AgentFinished => "Agent finished",
+            AttentionKind::DirtyWorktree => "Uncommitted changes",
+            AttentionKind::Ahead => "Not pushed",
+            AttentionKind::Behind => "Behind remote",
+            AttentionKind::PrAssigned => "Open PR",
+            AttentionKind::PrunableBranches => "Prunable branches",
+            AttentionKind::AgentRunning => "Agent running",
         }
     }
 }
@@ -705,6 +722,24 @@ mod tests {
             (AgentRunning, Severity::Info),
         ] {
             assert_eq!(kind.severity(), severity, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_kind_has_a_chip_label() {
+        use AttentionKind::*;
+        for (kind, label) in [
+            (CiFailing, "CI failing"),
+            (ReviewRequested, "Review requested"),
+            (AgentFinished, "Agent finished"),
+            (DirtyWorktree, "Uncommitted changes"),
+            (Ahead, "Not pushed"),
+            (Behind, "Behind remote"),
+            (PrAssigned, "Open PR"),
+            (PrunableBranches, "Prunable branches"),
+            (AgentRunning, "Agent running"),
+        ] {
+            assert_eq!(kind.label(), label, "{kind:?}");
         }
     }
 

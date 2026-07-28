@@ -40,7 +40,7 @@ pub struct GitStatus {
 pub struct Repo {
     /// Stable id — absolute path on disk.
     pub id: String,
-    /// Human display name: README H1 → slug → directory name.
+    /// Human display name: short README H1 (when name-like) → remote repo → directory.
     pub display_name: String,
     /// owner/repo slug parsed from the origin remote, if any.
     pub slug: Option<String>,

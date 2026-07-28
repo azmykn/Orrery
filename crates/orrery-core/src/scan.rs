@@ -235,12 +235,7 @@ fn build_repo(
         .unwrap_or_else(|| "repo".to_string());
 
     let (readme_title, description) = read_readme(path);
-    let display_name = readme_title
-        .or_else(|| {
-            slug.as_ref()
-                .and_then(|s| s.rsplit('/').next().map(String::from))
-        })
-        .unwrap_or_else(|| dir_name.clone());
+    let display_name = resolve_display_name(readme_title, slug.as_deref(), &dir_name);
 
     let activity = classify_activity(last_commit_unix, now);
 
@@ -341,6 +336,47 @@ fn parse_remote(url: &str) -> (Option<Host>, Option<String>, Option<String>) {
     let domain = (!domain_raw.is_empty()).then(|| domain_raw.to_string());
 
     (host, slug, domain)
+}
+
+/// Pick a card title: a short README H1 when it looks like a project name,
+/// otherwise the remote repo short name, then the directory basename.
+fn resolve_display_name(
+    readme_title: Option<String>,
+    slug: Option<&str>,
+    dir_name: &str,
+) -> String {
+    if let Some(title) = readme_title.filter(|t| usable_readme_title(t)) {
+        return title;
+    }
+    slug.and_then(|s| s.rsplit('/').next().map(String::from))
+        .unwrap_or_else(|| dir_name.to_string())
+}
+
+/// README H1s are often legal notices or "Modules Overview" banners — reject
+/// those so the card shows the repo/folder name instead.
+fn usable_readme_title(title: &str) -> bool {
+    const MAX_CHARS: usize = 40;
+    let char_len = title.chars().count();
+    if title.is_empty() || char_len > MAX_CHARS {
+        return false;
+    }
+    let lower = title.to_lowercase();
+    // English document / legal headings (common in Odoo addon READMEs).
+    if lower.contains("legal notice")
+        || lower.contains("modules overview")
+        || lower.contains("ownership")
+        || lower.contains("copyright")
+        || lower.ends_with(" overview")
+        || (lower.contains(" & ") && char_len > 24)
+    {
+        return false;
+    }
+    // Arabic legal / ownership phrases seen in bilingual NOTICE headings.
+    if title.contains("إشعار") || title.contains("ملكية") || title.contains("تحذير")
+    {
+        return false;
+    }
+    true
 }
 
 /// Returns (display title from first H1, first descriptive paragraph).
@@ -666,6 +702,72 @@ mod tests {
         );
         // multiple links on one line must all collapse to their text
         assert_eq!(clean_markdown("[A](u1) and [B](u2)"), "A and B");
+    }
+
+    #[test]
+    fn usable_readme_title_accepts_short_project_names() {
+        assert!(usable_readme_title("Next.js"));
+        assert!(usable_readme_title("Orrery"));
+        assert!(usable_readme_title("Digits HR"));
+        assert!(!usable_readme_title(""));
+        assert!(!usable_readme_title(&"x".repeat(41)));
+        assert!(!usable_readme_title("digitshr Modules Overview"));
+        assert!(!usable_readme_title("Digits Tools Modules Overview"));
+        assert!(!usable_readme_title(
+            "Legal Notice & Ownership — إشعار قانوني وتحذير ملكية"
+        ));
+        assert!(!usable_readme_title("Something Legal Notice Here"));
+        assert!(!usable_readme_title("Fleet overview"));
+    }
+
+    #[test]
+    fn resolve_display_name_prefers_name_like_readme_then_remote_then_dir() {
+        assert_eq!(
+            resolve_display_name(Some("Next.js".into()), Some("vercel/next.js"), "next"),
+            "Next.js"
+        );
+        assert_eq!(
+            resolve_display_name(
+                Some("digitshr Modules Overview".into()),
+                Some("owner/digits_hr"),
+                "digits_hr"
+            ),
+            "digits_hr"
+        );
+        assert_eq!(
+            resolve_display_name(
+                Some("Legal Notice & Ownership — إشعار قانوني".into()),
+                Some("owner/uac"),
+                "uac"
+            ),
+            "uac"
+        );
+        assert_eq!(
+            resolve_display_name(
+                Some("Digits Tools Modules Overview".into()),
+                None,
+                "digits_tools"
+            ),
+            "digits_tools"
+        );
+        assert_eq!(resolve_display_name(None, None, "local-only"), "local-only");
+    }
+
+    #[test]
+    fn read_readme_title_still_extracted_but_may_be_rejected_for_display() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("README.md"),
+            "# digitshr Modules Overview\n\nHR addons for Odoo.\n",
+        )
+        .unwrap();
+        let (title, desc) = read_readme(dir.path());
+        assert_eq!(title.as_deref(), Some("digitshr Modules Overview"));
+        assert_eq!(desc.as_deref(), Some("HR addons for Odoo."));
+        assert_eq!(
+            resolve_display_name(title, Some("owner/digits_hr"), "digits_hr"),
+            "digits_hr"
+        );
     }
 
     #[test]

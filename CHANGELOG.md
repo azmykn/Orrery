@@ -52,7 +52,7 @@ under `odoo18` / `odoo19`, nested submodule trees such as `manooshaalreef`).
 
 - Invisible **minimize / maximize / close** and header **+** when only Orrery
   lucide assets were registered (gpui-component `IconName` paths never loaded).
-- Single-repo add path (e.g. `/home/azmy/Orrery`) without requiring a parent of
+- Single-repo add path (e.g. `/home/user/Projects/Orrery`) without requiring a parent of
   many repos.
 
 ### Screenshots
@@ -62,8 +62,8 @@ under `odoo18` / `odoo19`, nested submodule trees such as `manooshaalreef`).
 | Mission Control | ![Mission Control](docs/public/shots/mission-control.png) |
 | Header: **+** chip + window controls (add entry is now a tabbed modal) | ![Header add](docs/public/shots/header-add-and-window-controls.png) |
 | Changes / commit | ![Changes](docs/public/shots/changes-commit.png) |
-| Explore (Odoo workspace) | ![Explore](docs/public/shots/explore-odoo.png) |
-| Attention list | ![Attention](docs/public/shots/attention-list.png) |
+| Explore | ![Explore](docs/public/shots/explore.png) |
+| List view | ![List view](docs/public/shots/list-view.png) |
 | Header before contrast fix (reference) | ![Header before](docs/public/shots/header-before-contrast-fix.png) |
 
 ---

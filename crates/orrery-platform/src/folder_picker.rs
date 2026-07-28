@@ -110,20 +110,20 @@ mod tests {
     #[test]
     fn decodes_plain_file_uri() {
         assert_eq!(
-            file_uri_to_path("file:///home/azmy/Orrery"),
-            Some(PathBuf::from("/home/azmy/Orrery"))
+            file_uri_to_path("file:///home/user/Projects/Orrery"),
+            Some(PathBuf::from("/home/user/Projects/Orrery"))
         );
     }
 
     #[test]
     fn decodes_percent_encoded_spaces() {
         assert_eq!(
-            percent_decode("/home/azmy/My%20Projects"),
-            "/home/azmy/My Projects"
+            percent_decode("/home/user/My%20Projects"),
+            "/home/user/My Projects"
         );
         assert_eq!(
-            file_uri_to_path("file:///home/azmy/My%20Projects"),
-            Some(PathBuf::from("/home/azmy/My Projects"))
+            file_uri_to_path("file:///home/user/My%20Projects"),
+            Some(PathBuf::from("/home/user/My Projects"))
         );
     }
 

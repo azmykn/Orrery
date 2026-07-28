@@ -510,6 +510,47 @@ fn urgent_kind_enabled(cfg: &AppConfig, kind: AttentionKind) -> bool {
 /// Max attention items surfaced in the tray menu.
 const TRAY_TOP: usize = 3;
 
+/// Max attention-reason chips shown on a Mission Control card / list row.
+const REASON_CHIPS: usize = 2;
+
+/// Top unique attention kinds for a local repo (items are already severity-
+/// sorted). Returns chip labels, how many kinds were omitted ("+N"), and a
+/// glance subtitle from the top item (summary · non-URL detail).
+fn attention_reason_chips(
+    items: &[AttentionItem],
+    repo_id: &SharedString,
+) -> (Vec<(SharedString, Severity)>, usize, Option<SharedString>) {
+    let mut chips = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut more = 0usize;
+    let mut subtitle = None;
+    for item in items
+        .iter()
+        .filter(|i| i.repo.id.as_deref() == Some(repo_id.as_ref()))
+    {
+        if !seen.insert(item.kind) {
+            continue;
+        }
+        if chips.len() < REASON_CHIPS {
+            chips.push((SharedString::from(item.kind.label()), item.severity));
+            if subtitle.is_none() {
+                let mut line = item.summary.clone();
+                if let Some(detail) = item
+                    .detail
+                    .as_ref()
+                    .filter(|d| !d.starts_with("http://") && !d.starts_with("https://"))
+                {
+                    line = format!("{line} · {detail}");
+                }
+                subtitle = Some(SharedString::from(line));
+            }
+        } else {
+            more += 1;
+        }
+    }
+    (chips, more, subtitle)
+}
+
 /// Fold the ranked attention list into the tray's compact summary: actionable
 /// counts (Urgent + Attention — Info is ambient and stays off the tray) and
 /// the top few lines. `items` is already severity-sorted, so the top lines
@@ -803,7 +844,7 @@ impl OrreryApp {
             cx.new(|cx| InputState::new(window, cx).placeholder("git@github.com:owner/repo.git"));
         let template = cx.new(|cx| InputState::new(window, cx).placeholder("~/templates/rust"));
         let root_path =
-            cx.new(|cx| InputState::new(window, cx).placeholder("~/Orrery or ~/odoo/odoo19"));
+            cx.new(|cx| InputState::new(window, cx).placeholder("~/Projects or ~/code/my-app"));
         let subs = vec![
             cx.observe(&url, |_this, _e, cx| cx.notify()),
             cx.observe(&name, |_this, _e, cx| cx.notify()),
@@ -4277,15 +4318,20 @@ impl OrreryApp {
     }
 
     /// The card state flags for `rows[idx]`: live agent session, urgent
-    /// attention, and fleet selection. Cheap map lookups — fine inside the
-    /// `uniform_list` closures.
+    /// attention, reason chips, and fleet selection. Cheap map lookups — fine
+    /// inside the `uniform_list` closures.
     fn card_state(&self, idx: usize, selecting: bool) -> crate::card::CardState {
         let id = &self.rows[idx].id;
+        let (reason_chips, reasons_more, reason_subtitle) =
+            attention_reason_chips(&self.attention_items, id);
         crate::card::CardState {
             active: self.active_agents.contains(id),
             urgent: self.attention_by_repo.get(id).copied() == Some(Severity::Urgent),
             selected: selecting && self.selected.contains(id),
             selecting,
+            reason_chips,
+            reasons_more,
+            reason_subtitle,
         }
     }
 
@@ -5911,6 +5957,34 @@ mod tests {
             summary: format!("{kind:?} in {name}"),
             detail: None,
         }
+    }
+
+    #[test]
+    fn attention_reason_chips_dedupes_and_caps() {
+        let items = vec![
+            item(AttentionKind::CiFailing, "a", Some("/a")),
+            item(AttentionKind::ReviewRequested, "a", Some("/a")),
+            item(AttentionKind::DirtyWorktree, "a", Some("/a")),
+            item(AttentionKind::Ahead, "a", Some("/a")),
+            item(AttentionKind::CiFailing, "b", Some("/b")),
+        ];
+        let id = SharedString::from("/a");
+        let (chips, more, subtitle) = attention_reason_chips(&items, &id);
+        assert_eq!(
+            chips.iter().map(|(l, _)| l.as_ref()).collect::<Vec<_>>(),
+            vec!["CI failing", "Review requested"]
+        );
+        assert_eq!(more, 2, "DirtyWorktree + Ahead overflow");
+        assert!(
+            subtitle
+                .as_ref()
+                .is_some_and(|s| s.as_ref().contains("CiFailing")),
+            "subtitle uses top item summary"
+        );
+
+        let quiet = SharedString::from("/missing");
+        let (chips, more, subtitle) = attention_reason_chips(&items, &quiet);
+        assert!(chips.is_empty() && more == 0 && subtitle.is_none());
     }
 
     #[test]

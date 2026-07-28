@@ -51,12 +51,14 @@ A three-crate Cargo workspace; the UI calls the core directly (no IPC boundary).
 
 Display name resolves in this order (works offline from Phase 1; hosts only enrich):
 
-1. **README H1** (`# Next.js`) → human display name (large on card)
-2. **Host description** → tagline/subtitle (Phase 2)
-3. **Remote slug** `owner/repo` → fallback **and** the host join key
-4. **Directory name** → final fallback (shown small beside/below the display name)
+1. **README H1** (`# Next.js`) → human display name **only when it looks like a short project name** (≤ ~40 chars; not legal notices, "Modules Overview", bilingual ownership banners, etc.)
+2. **Remote repo short name** from `owner/repo` → primary fallback (large on card)
+3. **Directory basename** → final fallback
+4. **Host description** / README first paragraph → tagline/subtitle (not the card title)
 
-> Note: GitHub/GitLab repos have no separate human "display name" field — the API gives a slug + description. The prettier title almost always lives in the README H1, which is why it's the primary source and available offline.
+The remote slug `owner/repo` remains the host join key regardless of display name.
+
+> Note: GitHub/GitLab have no separate human "display name" field — only a slug + description. A short README H1 is still a good title when it is a real project name; long legal/overview headings are ignored so the card shows the repo or folder name.
 
 ## Card anatomy (MVP)
 

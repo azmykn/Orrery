@@ -40,9 +40,9 @@ Full notes: **[CHANGELOG.md](CHANGELOG.md)**.
 </p>
 
 <p align="center">
-  <img src="docs/public/shots/explore-odoo.png" alt="Explore view in an Odoo workspace" width="420">
+  <img src="docs/public/shots/explore.png" alt="Explore — starred repos" width="420">
   &nbsp;
-  <img src="docs/public/shots/attention-list.png" alt="Attention list filter" width="420">
+  <img src="docs/public/shots/list-view.png" alt="Mission Control — list view" width="420">
 </p>
 
 ## What is it?
