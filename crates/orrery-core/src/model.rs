@@ -209,6 +209,19 @@ pub struct WorkspaceGroup {
     pub prefixes: Vec<String>,
 }
 
+/// True when `path` is under any configured pull-only prefix (upstream /
+/// vendor trees you update with Pull and never Push).
+pub fn path_is_pull_only(path: &str, prefixes: &[String]) -> bool {
+    if prefixes.is_empty() {
+        return false;
+    }
+    let path = path.trim_end_matches('/');
+    prefixes.iter().any(|p| {
+        let p = p.trim_end_matches('/');
+        !p.is_empty() && (path == p || path.starts_with(&format!("{p}/")))
+    })
+}
+
 pub(crate) fn default_sidebar_width() -> f32 {
     236.0
 }

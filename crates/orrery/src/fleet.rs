@@ -75,6 +75,10 @@ pub enum FleetOp {
     /// Only ever started through the confirm strip
     /// ([`OrreryApp::confirm_fleet_reset`]) — `git reset --hard @{upstream}`.
     ResetHard,
+    /// Only ever started through the confirm strip
+    /// ([`OrreryApp::confirm_fleet_discard`]) — discard uncommitted changes
+    /// relative to HEAD (`reset --hard HEAD` + `clean -fd`). Keeps commits.
+    DiscardChanges,
 }
 
 impl FleetOp {
@@ -90,6 +94,7 @@ impl FleetOp {
             FleetOp::GenerateAndCommit => "Generating",
             FleetOp::Prune => "Pruning",
             FleetOp::ResetHard => "Resetting",
+            FleetOp::DiscardChanges => "Discarding",
         }
     }
 
@@ -105,6 +110,7 @@ impl FleetOp {
             FleetOp::GenerateAndCommit => "Generate & commit",
             FleetOp::Prune => "Prune",
             FleetOp::ResetHard => "Reset hard",
+            FleetOp::DiscardChanges => "Discard changes",
         }
     }
 }
@@ -158,6 +164,7 @@ impl OrreryApp {
         // Editing the selection invalidates a pending prune/reset/commit confirm.
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_discard = None;
         self.fleet_commit = None;
         if !self.selected.remove(&id) {
             self.selected.insert(id);
@@ -170,6 +177,7 @@ impl OrreryApp {
         if !self.selected.is_empty()
             || self.fleet_prune.is_some()
             || self.fleet_reset.is_some()
+            || self.fleet_discard.is_some()
             || self.fleet_commit.is_some()
         {
             self.clear_selection_quiet();
@@ -183,6 +191,7 @@ impl OrreryApp {
         self.selected.clear();
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_discard = None;
         self.fleet_commit = None;
     }
 
@@ -192,6 +201,7 @@ impl OrreryApp {
     pub fn select_all_visible(&mut self, cx: &mut Context<Self>) {
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_discard = None;
         self.fleet_commit = None;
         for i in self.visible_rows() {
             let id = self.rows[i].id.clone();
@@ -227,6 +237,7 @@ impl OrreryApp {
         }
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_discard = None;
         self.fleet_commit = None;
         self.selected = matched;
         cx.notify();
@@ -305,6 +316,7 @@ impl OrreryApp {
         // Starting any run invalidates a pending prune/reset/commit confirm.
         self.fleet_prune = None;
         self.fleet_reset = None;
+        self.fleet_discard = None;
         self.fleet_commit = None;
         let total = repos.len();
         self.fleet_seq += 1;
@@ -414,6 +426,13 @@ impl OrreryApp {
                         FleetOp::ResetHard => {
                             fleet::run(&repos, workers, &cancel, progress, fleet::reset_hard_op())
                         }
+                        FleetOp::DiscardChanges => fleet::run(
+                            &repos,
+                            workers,
+                            &cancel,
+                            progress,
+                            fleet::discard_changes_op(),
+                        ),
                     }
                 })
                 .await;
@@ -437,6 +456,7 @@ impl OrreryApp {
             || self.fleet_commit.is_some()
             || self.fleet_prune.is_some()
             || self.fleet_reset.is_some()
+            || self.fleet_discard.is_some()
         {
             return;
         }
@@ -514,6 +534,7 @@ impl OrreryApp {
         if self.fleet_run.is_some()
             || self.fleet_prune.is_some()
             || self.fleet_reset.is_some()
+            || self.fleet_discard.is_some()
             || self.fleet_commit.is_some()
         {
             return;
@@ -610,6 +631,7 @@ impl OrreryApp {
     pub fn start_fleet_reset(&mut self, cx: &mut Context<Self>) {
         if self.fleet_run.is_some()
             || self.fleet_reset.is_some()
+            || self.fleet_discard.is_some()
             || self.fleet_prune.is_some()
             || self.fleet_commit.is_some()
         {
@@ -639,6 +661,52 @@ impl OrreryApp {
     /// Dismiss a pending hard-reset confirm without running it.
     pub fn cancel_fleet_reset(&mut self, cx: &mut Context<Self>) {
         if self.fleet_reset.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Arm a discard-changes confirm for the current selection (`reset --hard
+    /// HEAD` + `clean -fd` per dirty repo). Nothing is discarded until
+    /// [`Self::confirm_fleet_discard`].
+    pub fn start_fleet_discard(&mut self, cx: &mut Context<Self>) {
+        let repos: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| self.selected.contains(&r.id) && r.dirty > 0)
+            .map(|r| r.id.to_string())
+            .collect();
+        self.start_fleet_discard_repos(repos, cx);
+    }
+
+    /// Arm discard for an explicit repo list (fleet bar selection or a single
+    /// dirty repo from the context menu).
+    pub fn start_fleet_discard_repos(&mut self, repos: Vec<String>, cx: &mut Context<Self>) {
+        if self.fleet_run.is_some()
+            || self.fleet_discard.is_some()
+            || self.fleet_reset.is_some()
+            || self.fleet_prune.is_some()
+            || self.fleet_commit.is_some()
+        {
+            return;
+        }
+        if repos.is_empty() {
+            return;
+        }
+        self.fleet_discard = Some(repos);
+        cx.notify();
+    }
+
+    /// Execute the armed discard across the planned repos.
+    pub fn confirm_fleet_discard(&mut self, cx: &mut Context<Self>) {
+        let Some(repos) = self.fleet_discard.take() else {
+            return;
+        };
+        self.run_fleet_repos(FleetOp::DiscardChanges, repos, cx);
+    }
+
+    /// Dismiss a pending discard confirm without running it.
+    pub fn cancel_fleet_discard(&mut self, cx: &mut Context<Self>) {
+        if self.fleet_discard.take().is_some() {
             cx.notify();
         }
     }
@@ -708,14 +776,23 @@ impl OrreryApp {
         cx: &mut Context<Self>,
         visible: usize,
     ) -> Option<gpui::AnyElement> {
-        if self.selected.is_empty() && self.fleet_run.is_none() {
+        if self.selected.is_empty()
+            && self.fleet_run.is_none()
+            && self.fleet_discard.is_none()
+            && self.fleet_reset.is_none()
+        {
             return None;
         }
         let idle = self.fleet_run.is_none()
             && self.fleet_prune.is_none()
             && self.fleet_reset.is_none()
+            && self.fleet_discard.is_none()
             && self.fleet_commit.is_none();
         let ai_ready = self.services.ai_ready;
+        let selection_has_dirty = self
+            .rows
+            .iter()
+            .any(|r| self.selected.contains(&r.id) && r.dirty > 0);
         let mut bar = div()
             .flex()
             .flex_row()
@@ -855,7 +932,19 @@ impl OrreryApp {
                 true,
                 t,
                 cx.listener(|this, _e, _w, cx| this.start_fleet_reset(cx)),
-            ))
+            ));
+        if selection_has_dirty {
+            bar = bar.child(bar_btn(
+                "fleet-discard",
+                "trash-2",
+                "Discard changes",
+                idle,
+                true,
+                t,
+                cx.listener(|this, _e, _w, cx| this.start_fleet_discard(cx)),
+            ));
+        }
+        bar = bar
             .child(bar_btn(
                 "fleet-launch",
                 "code",
@@ -921,6 +1010,55 @@ impl OrreryApp {
                     false,
                     t,
                     cx.listener(|this, _e, _w, cx| this.cancel_fleet_commit(cx)),
+                ));
+            return Some(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(strip)
+                    .child(bar)
+                    .into_any_element(),
+            );
+        }
+        // A pending discard confirm expands the bar into a danger strip.
+        if let Some(repos) = &self.fleet_discard {
+            let n = repos.len();
+            let strip = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.))
+                .px(px(16.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(rgb(t.behind))
+                .bg(rgb(t.danger_badge))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(t.text_small))
+                        .text_color(rgb(t.fg0))
+                        .child(SharedString::from(format!(
+                            "Discard all uncommitted changes in {n} repo(s)? Resets tracked files to HEAD and removes untracked files. This cannot be undone."
+                        ))),
+                )
+                .child(bar_btn(
+                    "fleet-discard-confirm",
+                    "trash-2",
+                    "Confirm discard",
+                    true,
+                    true,
+                    t,
+                    cx.listener(|this, _e, _w, cx| this.confirm_fleet_discard(cx)),
+                ))
+                .child(bar_btn(
+                    "fleet-discard-cancel",
+                    "x",
+                    "Cancel",
+                    true,
+                    false,
+                    t,
+                    cx.listener(|this, _e, _w, cx| this.cancel_fleet_discard(cx)),
                 ));
             return Some(
                 div()

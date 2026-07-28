@@ -88,6 +88,7 @@ impl Default for AppConfig {
             sidebar_collapsed: false,
             workspace_groups: Vec::new(),
             active_workspace_group: None,
+            pull_only_prefixes: Vec::new(),
         }
     }
 }
@@ -123,6 +124,30 @@ pub fn seed_odoo_groups_if_empty(cfg: &mut AppConfig) -> bool {
     true
 }
 
+/// If `pull_only_prefixes` is empty, seed Odoo `core/` + `custom/` under each
+/// root (vendor / third-party — Pull, don't Push). Leaves `digits/` writable.
+/// Returns true when prefixes were added (caller should persist).
+pub fn seed_pull_only_if_empty(cfg: &mut AppConfig) -> bool {
+    if !cfg.pull_only_prefixes.is_empty() {
+        return false;
+    }
+    let mut prefixes = Vec::new();
+    for root in &cfg.roots {
+        let root_path = crate::scan::expand(root);
+        for sub in ["core", "custom"] {
+            let p = root_path.join(sub);
+            if p.is_dir() {
+                prefixes.push(p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if prefixes.is_empty() {
+        return false;
+    }
+    cfg.pull_only_prefixes = prefixes;
+    true
+}
+
 /// Load config, falling back to (and writing) defaults if absent/invalid.
 /// Cached after the first read; `save()` keeps the cache current.
 pub fn load() -> AppConfig {
@@ -130,7 +155,14 @@ pub fn load() -> AppConfig {
         return cfg;
     }
     let mut cfg = load_uncached();
+    let mut seeded = false;
     if seed_odoo_groups_if_empty(&mut cfg) {
+        seeded = true;
+    }
+    if seed_pull_only_if_empty(&mut cfg) {
+        seeded = true;
+    }
+    if seeded {
         let _ = save(&cfg);
     }
     if let Ok(mut g) = CACHE.write() {

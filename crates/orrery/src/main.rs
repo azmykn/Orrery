@@ -178,6 +178,7 @@ fn main() {
                             fleet_prune: None,
                             fleet_prune_seq: 0,
                             fleet_reset: None,
+                            fleet_discard: None,
                             fleet_commit: None,
                             toasts: Vec::new(),
                             toast_seq: 0,

@@ -411,6 +411,18 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
             .text_color(rgb(t.fg3))
             .child("A single git repo or a folder of repos."),
     );
+    if !s.draft.pull_only_prefixes.is_empty() {
+        let n = s.draft.pull_only_prefixes.len();
+        col = col.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(t.text_data_sm))
+                .text_color(rgb(t.fg2))
+                .child(format!(
+                    "Pull-only (upstream): {n} path(s) under core/custom — Pull to update, no Push, CI noise hidden. Edit pullOnlyPrefixes in ~/.config/orrery/config.toml."
+                )),
+        );
+    }
     for (i, root) in s.draft.roots.iter().enumerate() {
         // Element ids must be unique — every row used to share `ib-x`, so GPUI
         // dropped/misrouted clicks and × appeared dead.

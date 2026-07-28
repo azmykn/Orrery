@@ -100,6 +100,21 @@ impl AttentionKind {
             AttentionKind::AgentRunning => "Agent running",
         }
     }
+
+    /// What the user should do — shown in Mission Control subtitles.
+    pub fn action_hint(self) -> &'static str {
+        match self {
+            AttentionKind::CiFailing => "Open CI on the host",
+            AttentionKind::ReviewRequested => "Review the PR",
+            AttentionKind::AgentFinished => "Review agent output",
+            AttentionKind::DirtyWorktree => "Commit locally or discard",
+            AttentionKind::Ahead => "Push when ready",
+            AttentionKind::Behind => "Pull to update",
+            AttentionKind::PrAssigned => "Wait on reviewers / CI",
+            AttentionKind::PrunableBranches => "Prune in Cleanup",
+            AttentionKind::AgentRunning => "Let it finish",
+        }
+    }
 }
 
 /// How an attention item points back at a repo. Local facts carry the stable
@@ -309,6 +324,39 @@ pub fn compute(
         )
     });
     items
+}
+
+/// Apply pull-only / upstream policy: drop CI noise you can't fix, rewrite
+/// Ahead copy so Push isn't implied, and reinforce Behind → Pull.
+pub fn apply_pull_only_policy(
+    items: Vec<AttentionItem>,
+    pull_only_prefixes: &[String],
+) -> Vec<AttentionItem> {
+    use crate::model::path_is_pull_only;
+    items
+        .into_iter()
+        .filter_map(|mut item| {
+            let path = item.repo.id.as_deref().unwrap_or("");
+            let pull_only = path_is_pull_only(path, pull_only_prefixes);
+            match item.kind {
+                AttentionKind::CiFailing if pull_only => None,
+                AttentionKind::Ahead if pull_only => {
+                    item.summary = item.summary.replace("not pushed", "local only — don't push");
+                    if item.detail.is_none() {
+                        item.detail = Some("upstream / pull-only checkout".into());
+                    }
+                    Some(item)
+                }
+                AttentionKind::Behind => {
+                    if !item.summary.to_lowercase().contains("pull") {
+                        item.summary = format!("{} — Pull to update", item.summary);
+                    }
+                    Some(item)
+                }
+                _ => Some(item),
+            }
+        })
+        .collect()
 }
 
 fn item(

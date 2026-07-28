@@ -374,6 +374,9 @@ pub struct OrreryApp {
     pub fleet_prune_seq: u64,
     /// Pending hard-reset confirm: absolute paths to reset to `@{upstream}`.
     pub fleet_reset: Option<Vec<String>>,
+    /// Pending discard-changes confirm: absolute paths to reset to HEAD
+    /// (`reset --hard HEAD` + `clean -fd`). Distinct from [`Self::fleet_reset`].
+    pub fleet_discard: Option<Vec<String>>,
     /// Pending bulk-commit message strip (one shared message for Commit All…).
     pub fleet_commit: Option<crate::fleet::CommitPlan>,
     /// Active toasts, oldest first (rendered bottom-right by
@@ -534,7 +537,7 @@ fn attention_reason_chips(
         if chips.len() < REASON_CHIPS {
             chips.push((SharedString::from(item.kind.label()), item.severity));
             if subtitle.is_none() {
-                let mut line = item.summary.clone();
+                let mut line = format!("{} — {}", item.summary, item.kind.action_hint());
                 if let Some(detail) = item
                     .detail
                     .as_ref()
@@ -647,7 +650,9 @@ impl OrreryApp {
             _ => Vec::new(),
         };
         let ci = orrery_core::ci::facts(&self.ci_states, &self.repos);
-        self.attention_items = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
+        let raw = attention::compute(&self.repos, inbox, &ci, &prunable, &agents);
+        self.attention_items =
+            attention::apply_pull_only_policy(raw, &self.config.pull_only_prefixes);
         // Items are severity-sorted (Urgent first), so a repo's first
         // occurrence is its highest severity.
         self.attention_by_repo.clear();
@@ -1255,22 +1260,7 @@ impl OrreryApp {
                 self.run_fleet_repos(crate::fleet::FleetOp::Fetch, repos, cx);
             }
             PaletteItem::Action(PaletteAction::PullBehind) => {
-                let repos: Vec<String> = self
-                    .rows
-                    .iter()
-                    .filter(|r| r.behind > 0)
-                    .map(|r| r.id.to_string())
-                    .collect();
-                if repos.is_empty() {
-                    self.push_toast(
-                        crate::toast::ToastKind::Info,
-                        "Nothing behind",
-                        Some("Every repo is up to date with its upstream.".into()),
-                        cx,
-                    );
-                } else {
-                    self.run_fleet_repos(crate::fleet::FleetOp::Pull, repos, cx);
-                }
+                self.pull_behind_repos(cx);
             }
             PaletteItem::Action(PaletteAction::FetchSelected) => {
                 self.run_fleet(crate::fleet::FleetOp::Fetch, cx)
@@ -3983,12 +3973,13 @@ impl OrreryApp {
             let app_ent = cx.entity();
             let can_stage = p.unstaged > 0;
             let can_commit = p.dirty > 0;
-            let can_push = p.ahead > 0;
+            let ahead = p.ahead;
             let can_update_submodules = p.child_count > 0;
             let menu_id = pid2.clone();
             sec = sec.child(row.context_menu(move |menu, _w, cx| {
                 let st = app_ent.read(cx);
                 let can_generate = can_commit && st.services.ai_ready;
+                let can_push = ahead > 0 && !st.is_pull_only(menu_id.as_ref());
                 crate::card::fill_repo_context_menu(
                     menu,
                     app_ent.clone(),
@@ -4018,7 +4009,7 @@ impl OrreryApp {
                     let app_c = cx.entity();
                     let can_stage = c.unstaged > 0;
                     let can_commit = c.dirty > 0;
-                    let can_push = c.ahead > 0;
+                    let ahead = c.ahead;
                     let can_update_submodules = c.child_count > 0;
                     let menu_id = c.id.clone();
                     let (cb_border, cb_bg) = if child_selected {
@@ -4070,6 +4061,7 @@ impl OrreryApp {
                         .context_menu(move |menu, _w, cx| {
                             let st = app_c.read(cx);
                             let can_generate = can_commit && st.services.ai_ready;
+                            let can_push = ahead > 0 && !st.is_pull_only(menu_id.as_ref());
                             crate::card::fill_repo_context_menu(
                                 menu,
                                 app_c.clone(),
@@ -5348,7 +5340,7 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _ev, _w, cx| this.toggle_activity(cx)),
             ))
-            // Attention filter: repos that are dirty / ahead / behind.
+            // Attention filter: repos that need you (with reasons on cards).
             .child(tool_btn(
                 "tb-attention",
                 "circle-alert",
@@ -5357,10 +5349,19 @@ impl OrreryApp {
                 t,
                 cx.listener(|this, _ev, _w, cx| this.toggle_attention(cx)),
             ))
+            // One-click Pull for every repo behind its upstream (vendor trees).
+            .child(tool_btn(
+                "tb-pull-behind",
+                "cloud-download",
+                Some("Pull behind"),
+                false,
+                t,
+                cx.listener(|this, _ev, _w, cx| this.pull_behind_repos(cx)),
+            ))
             // Force-refresh host enrichment.
             .child(tool_btn(
                 "tb-fetch",
-                "cloud-download",
+                "refresh-cw",
                 Some("Fetch all"),
                 false,
                 t,
@@ -5664,6 +5665,8 @@ impl Render for OrreryApp {
                     this.close_overlay();
                     window.focus(&this.focus, cx);
                     cx.notify();
+                } else if this.fleet_discard.is_some() {
+                    this.cancel_fleet_discard(cx);
                 } else if this.fleet_reset.is_some() {
                     this.cancel_fleet_reset(cx);
                 } else if this.fleet_commit.is_some() {

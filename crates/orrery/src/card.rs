@@ -56,6 +56,14 @@ pub(crate) fn fill_repo_context_menu(
         }));
     }
     if can_commit {
+        let (a_discard, id_discard) = (app.clone(), repo_id.clone());
+        m = m.item(
+            PopupMenuItem::new("Revert all changes").on_click(move |_, _, cx| {
+                a_discard.update(cx, |this, cx| {
+                    this.start_fleet_discard_repos(vec![id_discard.to_string()], cx);
+                });
+            }),
+        );
         let (a_open, id_open) = (app.clone(), repo_id.clone());
         m = m.item(
             PopupMenuItem::new("Commit All…").on_click(move |_, window, cx| {
@@ -646,7 +654,7 @@ pub fn card(
     let repo_id = row.id.clone();
     let can_stage = row.unstaged > 0;
     let can_commit = row.dirty > 0;
-    let can_push = row.ahead > 0;
+    let ahead = row.ahead;
     let can_update_submodules = row.child_count > 0;
     div()
         .id(SharedString::from(format!("card-{idx}")))
@@ -670,6 +678,7 @@ pub fn card(
         .context_menu(move |menu, _window, cx| {
             let st = app_menu.read(cx);
             let can_generate = can_commit && st.services.ai_ready;
+            let can_push = ahead > 0 && !st.is_pull_only(repo_id.as_ref());
             let selection_n = st.selected.len();
             let fleet_ai = st.services.ai_ready;
             fill_repo_context_menu(
@@ -887,7 +896,7 @@ pub(crate) fn list_item(
     let repo_id = row.id.clone();
     let can_stage = row.unstaged > 0;
     let can_commit = row.dirty > 0;
-    let can_push = row.ahead > 0;
+    let ahead = row.ahead;
     let can_update_submodules = row.child_count > 0;
     let mut shell = div()
         .id(SharedString::from(format!("lrow-{idx}")))
@@ -905,6 +914,7 @@ pub(crate) fn list_item(
         .context_menu(move |menu, _window, cx| {
             let st = app_menu.read(cx);
             let can_generate = can_commit && st.services.ai_ready;
+            let can_push = ahead > 0 && !st.is_pull_only(repo_id.as_ref());
             let selection_n = st.selected.len();
             let fleet_ai = st.services.ai_ready;
             fill_repo_context_menu(
