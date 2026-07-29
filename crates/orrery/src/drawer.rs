@@ -2579,7 +2579,7 @@ fn footer(
         ))
         .child(launch_btn(
             "drawer-agent",
-            SharedString::from("Agent"),
+            SharedString::from(orrery_core::config::agent_launcher_label(agent_cmd)),
             true,
             t,
             {

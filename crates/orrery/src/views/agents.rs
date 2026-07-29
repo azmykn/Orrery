@@ -163,6 +163,8 @@ fn agent_program(cmd: &str) -> Option<String> {
         "xfce4-terminal",
         "urxvt",
         "ghostty",
+        "ptyxis",
+        "xdg-terminal-exec",
         "start",
     ];
     cmd.split_whitespace()

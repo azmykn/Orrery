@@ -81,7 +81,12 @@ impl SettingsState {
         };
         SettingsState {
             ide: field(window, cx, "code {path}", &cfg.ide_command),
-            agent: field(window, cx, "agent command", &cfg.agent_command),
+            agent: field(
+                window,
+                cx,
+                "ptyxis --new-window -d {path}  (or … -- aider)",
+                &cfg.agent_command,
+            ),
             agent_dispatch: field(window, cx, "{prompt}", &cfg.agent_dispatch_args),
             ollama_host: field(window, cx, "http://localhost:11434", &cfg.ollama_host),
             ai_model: field(window, cx, "model name", &cfg.ai_model),
@@ -524,7 +529,11 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
 fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
     section(t, "Launchers")
         .child(labeled("IDE command", s.ide.clone(), t))
-        .child(labeled("Agent command", s.agent.clone(), t))
+        .child(labeled(
+            "Terminal / agent command (opens shell or local agent at {path})",
+            s.agent.clone(),
+            t,
+        ))
         .child(labeled(
             "Agent dispatch args ({prompt} = task)",
             s.agent_dispatch.clone(),

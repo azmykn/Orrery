@@ -658,7 +658,7 @@ pub fn card(
         ))
         .child(button(
             id_agent,
-            SharedString::from("Agent"),
+            SharedString::from(orrery_core::config::agent_launcher_label(agent_cmd)),
             true,
             t,
             agent_action,

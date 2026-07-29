@@ -113,12 +113,14 @@ pub struct AppConfig {
     pub ignore: Vec<String>,
     /// Command template to open a repo in the IDE. `{path}` is substituted.
     pub ide_command: String,
-    /// Command template to open a terminal coding agent in the repo.
+    /// Command template to open a terminal (or optional local coding agent) in
+    /// the repo. `{path}` is substituted. Default is a plain shell at `{path}`
+    /// — not a paid CLI like Claude Code.
     pub agent_command: String,
     /// Extra argv appended to `agent_command` when dispatching an agent with a
     /// task (drawer "Dispatch"). `{prompt}` is substituted as a single argument
     /// — the default passes the task as the agent CLI's trailing prompt arg,
-    /// which is what `claude`/`aider`/`codex` expect.
+    /// which is what `aider`/`opencode`/`codex` (and similar) expect.
     #[serde(default = "default_agent_dispatch_args")]
     pub agent_dispatch_args: String,
     /// GitHub OAuth app client id for the device-flow login (optional).
