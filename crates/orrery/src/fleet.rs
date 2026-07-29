@@ -343,12 +343,44 @@ impl OrreryApp {
     pub fn run_fleet_repos_msg(
         &mut self,
         op: FleetOp,
-        repos: Vec<String>,
+        mut repos: Vec<String>,
         commit_message: Option<String>,
         cx: &mut Context<Self>,
     ) {
         if self.fleet_run.is_some() || repos.is_empty() {
             return;
+        }
+        if matches!(op, FleetOp::Push) {
+            let prefixes = &self.config.pull_only_prefixes;
+            let before = repos.len();
+            repos.retain(|r| !orrery_core::model::path_is_pull_only(r, prefixes));
+            let blocked = before - repos.len();
+            if repos.is_empty() {
+                self.push_toast(
+                    ToastKind::Error,
+                    "Push blocked",
+                    Some(
+                        "Selected repos are pull-only (upstream / vendor). Push is disabled."
+                            .into(),
+                    ),
+                    cx,
+                );
+                return;
+            }
+            if blocked > 0 {
+                self.push_toast(
+                    ToastKind::Info,
+                    "Skipped pull-only",
+                    Some(
+                        format!(
+                            "{blocked} {} skipped — push runs only on digits / pushable paths.",
+                            if blocked == 1 { "repo" } else { "repos" }
+                        )
+                        .into(),
+                    ),
+                    cx,
+                );
+            }
         }
         if matches!(op, FleetOp::CommitAll)
             && commit_message

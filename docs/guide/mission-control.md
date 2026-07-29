@@ -48,7 +48,7 @@ The toolbar **Actions ⚙** menu runs the same fleet ops (Fetch, Pull, Stage, Co
 - <kbd>Ctrl/Cmd+Shift+F</kbd> — Fetch selected
 - <kbd>Ctrl/Cmd+Shift+P</kbd> — Pull selected
 
-**Pull behind** (toolbar / command palette) selects every repo with `behind > 0` and fleet-pulls them — useful for upstream Odoo/core trees you keep current without hunting the Behind chip. Pair with **pull-only prefixes** in Settings so those trees never offer Push and upstream CI stays Info-severity.
+**Pull behind** (toolbar / command palette) selects every repo with `behind > 0` and fleet-pulls them — useful for upstream Odoo/core trees you keep current without hunting the Behind chip. Pair with **pull-only prefixes** in Settings so those trees never offer Push and upstream CI stays off the Attention chips (silence — you'll only hear about it if a push is attempted and fails).
 
 ## List view
 

@@ -24,7 +24,8 @@ pub enum AttentionKind {
     MergeConflict,
     /// The latest default-branch CI run failed.
     CiFailing,
-    /// Upstream CI is red on a pull-only checkout — informational only.
+    /// Upstream CI on a pull-only checkout. Kept for serde / label tables;
+    /// [`apply_pull_only_policy`] drops these (and `CiFailing`) so cards stay quiet.
     UpstreamCi,
     /// A PR is waiting on your review.
     ReviewRequested,
@@ -345,8 +346,8 @@ pub fn compute(
     items
 }
 
-/// Apply pull-only / upstream policy: drop CI noise you can't fix, rewrite
-/// Ahead copy so Push isn't implied, and reinforce Behind → Pull.
+/// Apply pull-only / upstream policy: silence CI you can't fix (no card chip),
+/// rewrite Ahead copy so Push isn't implied, and reinforce Behind → Pull.
 pub fn apply_pull_only_policy(
     items: Vec<AttentionItem>,
     pull_only_prefixes: &[String],
@@ -354,17 +355,13 @@ pub fn apply_pull_only_policy(
     use crate::model::path_is_pull_only;
     items
         .into_iter()
-        .map(|mut item| {
+        .filter_map(|mut item| {
             let path = item.repo.id.as_deref().unwrap_or("");
             let pull_only = path_is_pull_only(path, pull_only_prefixes);
             match item.kind {
-                AttentionKind::CiFailing if pull_only => {
-                    item.kind = AttentionKind::UpstreamCi;
-                    item.severity = AttentionKind::UpstreamCi.severity();
-                    item.summary = "Upstream CI failing — ignore (pull-only)".into();
-                    item.detail = Some("CI on upstream remotes is not your fix".into());
-                    item
-                }
+                // Pull-only trees: drop CI entirely — don't demote to UpstreamCi
+                // chips / subtitles. Surface push problems only when a push fails.
+                AttentionKind::CiFailing | AttentionKind::UpstreamCi if pull_only => None,
                 AttentionKind::Ahead if pull_only => {
                     item.summary = item
                         .summary
@@ -372,15 +369,15 @@ pub fn apply_pull_only_policy(
                     if item.detail.is_none() {
                         item.detail = Some("upstream / pull-only checkout".into());
                     }
-                    item
+                    Some(item)
                 }
                 AttentionKind::Behind => {
                     if !item.summary.to_lowercase().contains("pull") {
                         item.summary = format!("{} — Pull to update", item.summary);
                     }
-                    item
+                    Some(item)
                 }
-                _ => item,
+                _ => Some(item),
             }
         })
         .collect()
@@ -864,13 +861,19 @@ mod tests {
     }
 
     #[test]
-    fn pull_only_policy_demotes_ci_and_rewrites_ahead_behind() {
+    fn pull_only_policy_drops_ci_and_rewrites_ahead_behind() {
         let items = vec![
             item(
                 local_ref(&repo("/work/core/enterprise")),
                 AttentionKind::CiFailing,
                 "CI failing on the default branch".into(),
                 None,
+            ),
+            item(
+                local_ref(&repo("/work/core/enterprise")),
+                AttentionKind::UpstreamCi,
+                "Upstream CI failing — ignore (pull-only)".into(),
+                Some("CI on upstream remotes is not your fix".into()),
             ),
             item(
                 local_ref(&repo("/work/core/enterprise")),
@@ -893,13 +896,11 @@ mod tests {
         ];
         let prefixes = vec!["/work/core".into()];
         let out = apply_pull_only_policy(items, &prefixes);
-        assert_eq!(out.len(), 4);
-        let upstream = out
-            .iter()
-            .find(|i| i.kind == AttentionKind::UpstreamCi)
-            .expect("pull-only CI demoted");
-        assert!(upstream.summary.contains("ignore"));
-        assert_eq!(upstream.severity, Severity::Info);
+        assert_eq!(out.len(), 3, "pull-only CI items dropped");
+        assert!(!out.iter().any(|i| {
+            matches!(i.kind, AttentionKind::CiFailing | AttentionKind::UpstreamCi)
+                && i.repo.id.as_deref() == Some("/work/core/enterprise")
+        }));
         let ahead = out
             .iter()
             .find(|i| i.kind == AttentionKind::Ahead)

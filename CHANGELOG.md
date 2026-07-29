@@ -34,8 +34,11 @@ under `odoo18` / `odoo19`, nested submodule trees such as `manooshaalreef`).
 - **Pull behind** — toolbar / palette action fleet-pulls every repo with
   `behind > 0` (upstream checkouts stay current without hunting chips).
 - **Pull-only prefixes** — Settings editor for upstream path prefixes: Pull to
-  update, hide Push, demote upstream CI to Info; digits modules outside the list
-  stay Pushable.
+  update, hide Push, and **silence** upstream CI on Attention chips (no demoted
+  UpstreamCi noise); digits modules outside the list stay Pushable. Push
+  attempts on pull-only trees toast an error instead.
+- **Activity Log** — top-nav **Log** view: in-memory ring of recent scans,
+  toasts, fleet push/pull/fetch outcomes, and soft CI refresh notices.
 - **Attention chips** — Mission Control cards/list show top reason badges plus a
   suggested-action subtitle; **Merge conflict** is Urgent; empty Attention filter
   shows **All clear**.

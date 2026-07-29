@@ -157,7 +157,8 @@ The four original phases are substantially in place:
 DigitsCode fork (in tree / recent):
 
 - ✅ Submodule scan + TREE sidebar + hide-children grid.
-- ✅ Submodule Update (discover + pull on branch) + Pull behind + pull-only prefixes.
+- ✅ Submodule Update (discover + pull on branch) + Pull behind + pull-only prefixes (CI silent on cards).
+- ✅ Activity **Log** view (in-memory ring of scans / fleet / toast outcomes).
 - ✅ Actions ⚙ fleet bar (Fetch/Pull/Discard/…) + attention chips + external diff.
 - ✅ Stageable / Commitable / Pushable filters + context menus (grid + list) + fleet Stage/Push.
 - ✅ Smart **+** tabbed modal (path / clone / new repo); Commit All from working tree.

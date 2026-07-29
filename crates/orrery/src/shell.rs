@@ -45,6 +45,7 @@ pub enum View {
     Agents,
     Tools,
     Janitor,
+    Log,
     Settings,
 }
 
@@ -239,7 +240,7 @@ pub enum DrawerTab {
 }
 
 /// (view, lucide-icon, label) — labels match the real sidebar (route ≠ label).
-const NAV: [(View, &str, &str); 8] = [
+const NAV: [(View, &str, &str); 9] = [
     (View::Grid, "layout-grid", "Mission Control"),
     (View::Inbox, "inbox", "Inbox"),
     (View::Feed, "rss", "Feed"),
@@ -247,6 +248,7 @@ const NAV: [(View, &str, &str); 8] = [
     (View::Agents, "square-terminal", "Agents"),
     (View::Tools, "wrench", "Dev Tools"),
     (View::Janitor, "scissors", "Cleanup"),
+    (View::Log, "history", "Log"),
     (View::Settings, "settings", "Settings"),
 ];
 
@@ -384,6 +386,8 @@ pub struct OrreryApp {
     pub toasts: Vec<crate::toast::Toast>,
     /// Monotonic toast-id source — unique ids double as the stale-timer guard.
     pub toast_seq: u64,
+    /// In-memory activity log for the Log view (ring buffer; not persisted).
+    pub activity_log: crate::activity_log::ActivityLog,
     /// Mission Control's UI state (filters, sort, layout, saved views, graph).
     pub grid: GridState,
     /// The active contextual sub-filter for the current non-Grid view (e.g. the
@@ -537,7 +541,13 @@ fn attention_reason_chips(
         if chips.len() < REASON_CHIPS {
             chips.push((SharedString::from(item.kind.label()), item.severity));
             if subtitle.is_none() {
-                let mut line = format!("{} — {}", item.summary, item.kind.action_hint());
+                // Avoid "hint — Hint" when the summary already embeds the action.
+                let hint = item.kind.action_hint();
+                let mut line = if item.summary.to_lowercase().contains(&hint.to_lowercase()) {
+                    item.summary.clone()
+                } else {
+                    format!("{} — {}", item.summary, hint)
+                };
                 if let Some(detail) = item
                     .detail
                     .as_ref()
@@ -2086,6 +2096,19 @@ impl OrreryApp {
             return;
         }
         let repo = self.drawer.repo.clone();
+        if self.is_pull_only(&repo) {
+            self.push_toast(
+                ToastKind::Error,
+                "Push blocked",
+                Some(
+                    "This checkout is pull-only (upstream / vendor). Push is disabled — \
+                     clone or work under a digits path to push."
+                        .into(),
+                ),
+                cx,
+            );
+            return;
+        }
         let name = repo.rsplit('/').next().unwrap_or(&repo).to_string();
         self.drawer.push_busy = true;
         let key = format!("push:{repo}");
@@ -3557,12 +3580,18 @@ impl OrreryApp {
         // paths get live change events too. The watcher-driven rescan doesn't
         // come through here, so routine fs events never churn the watches.
         self.watcher.rearm();
+        self.activity_log.push(
+            crate::data::now_unix(),
+            crate::activity_log::LogLevel::Info,
+            "Scan started",
+        );
         cx.spawn(async move |this, cx| {
             let snap = cx
                 .background_executor()
                 .spawn(async { crate::data::rescan() })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                let n = snap.rows.len();
                 this.apply_snapshot(snap);
                 // Drop selected ids for repos that vanished in the rescan.
                 this.prune_selection();
@@ -3575,6 +3604,11 @@ impl OrreryApp {
                 // Fold the fresh snapshot into the semantic index (incremental;
                 // a no-op with AI off/unreachable).
                 this.index_semantic();
+                this.activity_log.push(
+                    crate::data::now_unix(),
+                    crate::activity_log::LogLevel::Info,
+                    format!("Scan finished — {n} repos"),
+                );
                 cx.notify();
             });
         })
@@ -4795,6 +4829,7 @@ impl OrreryApp {
             View::Janitor => Some(self.cleanup_panel(t, cx)),
             View::Explore => Some(self.explore_panel(t, cx)),
             View::Agents => Some(self.agents_panel(t, cx)),
+            View::Log => None,
         }
     }
 
@@ -5428,6 +5463,10 @@ impl OrreryApp {
                 &cx.entity(),
             )
             .into_any_element(),
+            View::Log => {
+                let entries: Vec<_> = self.activity_log.entries().cloned().collect();
+                crate::views::log::render(&entries, t, &cx.entity()).into_any_element()
+            }
             View::Tools => match &self.devtools {
                 Some(d) => crate::views::devtools::render(
                     d,
@@ -6046,6 +6085,7 @@ impl OrreryApp {
                         &cmds.1,
                         self.services.ai_ready,
                         self.services.github_authed,
+                        self.is_pull_only(repo.as_ref()),
                     )
                     .into_any_element(),
                 )
@@ -6197,6 +6237,7 @@ fn placeholder(view: View, t: &Theme) -> impl IntoElement {
         View::Agents => ("Agents", "Running terminal coding-agent sessions"),
         View::Tools => ("Dev Tools", "Utilities & quick actions"),
         View::Janitor => ("Cleanup", "Prunable branches & worktrees"),
+        View::Log => ("Log", "Recent app events — scans, fleet ops, push/pull"),
         View::Settings => ("Settings", "Roots, AI, launchers, appearance"),
         View::Grid => ("Mission Control", ""),
     };

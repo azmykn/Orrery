@@ -17,6 +17,7 @@ pub mod devtools;
 pub mod explore;
 pub mod feed;
 pub mod inbox;
+pub mod log;
 pub mod newproject;
 pub mod settings;
 

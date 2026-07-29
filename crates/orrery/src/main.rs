@@ -6,6 +6,7 @@
 //! Phase 1: real `--orr-*` theme + faithful RepoCard. Phase 2: the app shell —
 //! header + sidebar nav + view switching (`shell.rs`).
 
+mod activity_log;
 mod assets;
 mod card;
 mod data;
@@ -189,6 +190,7 @@ fn main() {
                             fleet_commit: None,
                             toasts: Vec::new(),
                             toast_seq: 0,
+                            activity_log: Default::default(),
                             grid: Default::default(),
                             view_filter: None,
                             focus: cx.focus_handle(),

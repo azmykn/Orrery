@@ -128,6 +128,13 @@ impl OrreryApp {
         url: Option<SharedString>,
         cx: &mut Context<Self>,
     ) -> u64 {
+        // Mirror resolved toasts into the activity log (skip Progress noise).
+        self.activity_log.record_toast(
+            crate::data::now_unix(),
+            kind,
+            title.as_ref(),
+            detail.as_ref().map(|d| d.as_ref()),
+        );
         self.toast_seq += 1;
         let id = self.toast_seq;
         let toast = Toast {
