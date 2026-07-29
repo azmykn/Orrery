@@ -6,9 +6,19 @@
 > apply anymore — the CPU-bound repaint tax described here is exactly what going
 > native removed. Kept as the record of *why* the rewrite happened.
 
-A record of why the old webview build felt less smooth than the same UI in a
-Chromium browser, everything we tried to close the gap, what actually shipped,
-and what that depended on.
+## Native scan & paint (DigitsCode fleets)
+
+For large workspaces (hundreds of repos under `odoo18` / `odoo19`):
+
+- **Scan** stays shallow for nested checkouts: top-level WalkDir + `.gitmodules`
+  discovery (no deep walk into every parent). Submodule Update then pulls
+  children on demand.
+- **Mission Control** virtualizes the grid/list — only on-screen cards paint.
+- **Flat design remains a performance contract**: style with `--orr-*` tokens and
+  elevation borders/shadows; avoid heavy blur / gradient / large-repaint effects
+  so GPUI stays smooth on dense fleets.
+
+The sections below are the pre-rewrite WebKitGTK / NVIDIA investigation.
 
 ## TL;DR
 

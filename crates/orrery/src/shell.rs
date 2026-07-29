@@ -2434,6 +2434,77 @@ impl OrreryApp {
         cx.notify();
     }
 
+    /// Append a pull-only prefix from the Settings input (expand ~).
+    pub fn settings_add_pull_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = &self.settings else { return };
+        let raw = s.add_pull_only.read(cx).value().trim().to_string();
+        if raw.is_empty() {
+            return;
+        }
+        let store = orrery_core::scan::expand(&raw)
+            .to_string_lossy()
+            .into_owned();
+        if let Some(s) = &mut self.settings {
+            if !s
+                .draft
+                .pull_only_prefixes
+                .iter()
+                .any(|p| orrery_core::scan::expand(p) == orrery_core::scan::expand(&store))
+            {
+                s.draft.pull_only_prefixes.push(store.clone());
+                s.saved = false;
+            }
+            let input = s.add_pull_only.clone();
+            input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        self.config.pull_only_prefixes = self
+            .settings
+            .as_ref()
+            .map(|s| s.draft.pull_only_prefixes.clone())
+            .unwrap_or_default();
+        let _ = orrery_core::config::save(&self.config);
+        self.recompute_attention();
+        cx.notify();
+    }
+
+    /// Remove a pull-only prefix by index and persist.
+    pub fn settings_remove_pull_only(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(s) = &mut self.settings {
+            if index < s.draft.pull_only_prefixes.len() {
+                s.draft.pull_only_prefixes.remove(index);
+                s.saved = false;
+            }
+            self.config.pull_only_prefixes = s.draft.pull_only_prefixes.clone();
+        }
+        let _ = orrery_core::config::save(&self.config);
+        self.recompute_attention();
+        cx.notify();
+    }
+
+    /// Open the external diff tool for a repo (and optional relative file).
+    pub fn open_external_diff(&mut self, repo: &str, file: Option<&str>, cx: &mut Context<Self>) {
+        let tmpl = if self.config.diff_command.trim().is_empty() {
+            orrery_core::model::default_diff_command()
+        } else {
+            self.config.diff_command.clone()
+        };
+        let file = file.unwrap_or("");
+        let cmd = tmpl.replace("{path}", repo).replace("{file}", file);
+        match orrery_core::launch::launch(&cmd, repo) {
+            Ok(()) => {}
+            Err(e) => {
+                self.push_toast(
+                    ToastKind::Error,
+                    "Couldn't open diff tool",
+                    Some(e.into()),
+                    cx,
+                );
+            }
+        }
+    }
+
     /// Append a typed workspace path to the draft + live config (smart detect),
     /// persist, toast, and rescan.
     pub fn settings_add_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2595,6 +2666,7 @@ impl OrreryApp {
         draft.ide_command = s.ide.read(cx).value().to_string();
         draft.agent_command = s.agent.read(cx).value().to_string();
         draft.agent_dispatch_args = s.agent_dispatch.read(cx).value().to_string();
+        draft.diff_command = s.diff_command.read(cx).value().to_string();
         draft.ollama_host = s.ollama_host.read(cx).value().to_string();
         draft.ai_model = s.ai_model.read(cx).value().to_string();
         draft.embed_model = s.embed_model.read(cx).value().to_string();
@@ -4343,13 +4415,27 @@ impl OrreryApp {
                     if this.ci_last_error != outcome.last_error
                         && let Some(err) = &outcome.last_error
                     {
-                        this.upsert_toast(
-                            "ci-pass",
-                            ToastKind::Info,
-                            "Couldn't refresh CI status",
-                            Some(err.clone().into()),
-                            cx,
-                        );
+                        // Soft Info (not sticky Error). When the hint points at
+                        // org SSO, make the toast a one-click link to authorize.
+                        let sso = err.contains("SSO") || err.contains("authorize org");
+                        if sso {
+                            this.upsert_toast_link(
+                                "ci-pass",
+                                ToastKind::Info,
+                                "Couldn't refresh CI status",
+                                Some(err.clone().into()),
+                                orrery_core::oauth::github_oauth_app_settings_url().into(),
+                                cx,
+                            );
+                        } else {
+                            this.upsert_toast(
+                                "ci-pass",
+                                ToastKind::Info,
+                                "Couldn't refresh CI status",
+                                Some(err.clone().into()),
+                                cx,
+                            );
+                        }
                     }
                     this.ci_last_error = outcome.last_error;
                 } else {
@@ -5383,6 +5469,46 @@ impl OrreryApp {
         // `None` (no element at all) until a selection exists or a run is live.
         // Select-all is the checkbox beside the All filter chip (above the list).
         let fleet_bar = self.fleet_bar(t, cx);
+        let list_area: gpui::AnyElement = if self.grid.filter == RepoFilter::Attention
+            && visible.is_empty()
+            && self.grid.query.trim().is_empty()
+        {
+            div()
+                .flex()
+                .flex_1()
+                .min_h(px(0.))
+                .items_center()
+                .justify_center()
+                .px(px(24.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(8.))
+                        .max_w(px(420.))
+                        .child(lucide("circle-check", 28., t.clean))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(t.text_h3))
+                                .text_color(rgb(t.fg0))
+                                .child("All clear"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(t.text_small))
+                                .text_color(rgb(t.fg2))
+                                .child(
+                                    "No repos need attention right now. Pull behind updates upstream checkouts; digits work stays Pushable.",
+                                ),
+                        ),
+                )
+                .into_any_element()
+        } else {
+            self.card_list(t, cx, cols, visible.clone())
+                .into_any_element()
+        };
         div()
             .flex()
             .flex_col()
@@ -5391,7 +5517,7 @@ impl OrreryApp {
             .children(band)
             .child(self.toolbar(t, cx, visible.len()))
             .child(self.filter_chips(t, cx))
-            .child(self.card_list(t, cx, cols, visible))
+            .child(list_area)
             .children(fleet_bar)
     }
 
@@ -5850,6 +5976,16 @@ impl Render for OrreryApp {
             .on_action(cx.listener(|this, _: &crate::PaletteConfirm, window, cx| {
                 this.confirm_palette(window, cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &crate::FleetFetchSelected, _window, cx| {
+                    this.run_fleet(crate::fleet::FleetOp::Fetch, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::FleetPullSelected, _window, cx| {
+                    this.run_fleet(crate::fleet::FleetOp::Pull, cx);
+                }),
+            )
             // Sidebar resize: track mouse while the handle is held.
             .on_mouse_move(cx.listener(|this, _ev, window, cx| {
                 if !this.sidebar_dragging || this.sidebar_collapsed {

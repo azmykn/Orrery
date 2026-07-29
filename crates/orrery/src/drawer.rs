@@ -1578,6 +1578,35 @@ fn changes_view(
     // line into the commit message.
     if let (Some(input), Some(body_input)) = (&data.commit_input, &data.commit_body_input) {
         let mut actions = div().flex().flex_row().items_center().gap(px(6.));
+        // External diff tool (meld / configured command).
+        {
+            let app_d = app.clone();
+            let repo_d = row.id.clone();
+            let file = data
+                .change_sel
+                .as_ref()
+                .map(|(p, _)| p.to_string())
+                .unwrap_or_default();
+            actions = actions.child(pr_btn(
+                SharedString::from("ext-diff"),
+                "Open external diff",
+                t,
+                move |cx: &mut gpui::App| {
+                    let file = file.clone();
+                    app_d.update(cx, |this, cx| {
+                        this.open_external_diff(
+                            &repo_d,
+                            if file.is_empty() {
+                                None
+                            } else {
+                                Some(file.as_str())
+                            },
+                            cx,
+                        );
+                    });
+                },
+            ));
+        }
         // AI: suggest a commit message from the working-tree diff (gated on aiReady).
         if ai_ready {
             let app3 = app.clone();

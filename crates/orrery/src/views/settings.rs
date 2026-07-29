@@ -58,6 +58,10 @@ pub struct SettingsState {
     pub client_id: Entity<InputState>,
     pub ignore: Entity<InputState>,
     pub add_root: Entity<InputState>,
+    /// Typed path to append to `draft.pull_only_prefixes`.
+    pub add_pull_only: Entity<InputState>,
+    /// External diff tool template (`{path}` / `{file}`).
+    pub diff_command: Entity<InputState>,
     /// Scan depth as a NumberInput (integer 1–8).
     pub scan_depth: Entity<InputState>,
     /// Flash a "Saved" confirmation after a successful save.
@@ -101,6 +105,8 @@ impl SettingsState {
             client_id: field(window, cx, "GitHub OAuth client id", &cfg.github_client_id),
             ignore: field(window, cx, "node_modules, .cache", &cfg.ignore.join(", ")),
             add_root: field(window, cx, "~/Projects or ~/code/my-app", ""),
+            add_pull_only: field(window, cx, "~/odoo/odoo19/core", ""),
+            diff_command: field(window, cx, "meld {path}", &cfg.diff_command),
             scan_depth: cx.new(|cx| {
                 InputState::new(window, cx)
                     .default_value(cfg.scan_depth.to_string())
@@ -416,18 +422,6 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
             .text_color(rgb(t.fg3))
             .child("A single git repo or a folder of repos."),
     );
-    if !s.draft.pull_only_prefixes.is_empty() {
-        let n = s.draft.pull_only_prefixes.len();
-        col = col.child(
-            div()
-                .mt(px(6.))
-                .text_size(px(t.text_data_sm))
-                .text_color(rgb(t.fg2))
-                .child(format!(
-                    "Pull-only (upstream): {n} path(s) under core/custom — Pull to update, no Push, CI noise hidden. Edit pullOnlyPrefixes in ~/.config/orrery/config.toml."
-                )),
-        );
-    }
     for (i, root) in s.draft.roots.iter().enumerate() {
         // Element ids must be unique — every row used to share `ib-x`, so GPUI
         // dropped/misrouted clicks and × appeared dead.
@@ -521,6 +515,99 @@ fn roots_section(s: &SettingsState, t: &Theme, app: &Entity<OrreryApp>) -> impl 
             .child(add),
     );
 
+    // Pull-only upstream prefixes (editable — not only config.toml).
+    col = col.child(
+        div()
+            .mt(px(14.))
+            .mb(px(4.))
+            .text_size(px(t.text_data_sm))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(t.fg1))
+            .child("Pull-only paths (upstream)"),
+    );
+    col = col.child(
+        div()
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(t.fg3))
+            .child(
+                "Repos under these prefixes: Pull to update, hide Push, demote upstream CI. Your digits modules stay Pushable when outside this list.",
+            ),
+    );
+    for (i, prefix) in s.draft.pull_only_prefixes.iter().enumerate() {
+        let remove = {
+            let app = app.clone();
+            let (hb, _) = (t.surface_hover, t.fg3);
+            div()
+                .id(SharedString::from(format!("ib-x-pullonly-{i}")))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(24.))
+                .h(px(24.))
+                .rounded(px(t.r_xs))
+                .cursor_pointer()
+                .hover(move |s| s.bg(rgb(hb)))
+                .child(lucide("x", 13., t.fg3))
+                .on_click(move |_ev, _win, cx| {
+                    app.update(cx, |this, cx| this.settings_remove_pull_only(i, cx));
+                })
+        };
+        col = col.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .child(lucide("arrow-down", 13., t.fg3))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .truncate()
+                        .font_family("monospace")
+                        .text_size(px(t.text_data_sm))
+                        .text_color(rgb(t.fg1))
+                        .child(SharedString::from(prefix.clone())),
+                )
+                .child(remove),
+        );
+    }
+    let add_po = {
+        let app = app.clone();
+        let (hb, hf) = (t.border_strong, t.fg0);
+        div()
+            .id("btn-Add-pull-only")
+            .px(px(14.))
+            .py(px(7.))
+            .rounded(px(t.r_sm))
+            .bg(rgb(t.button_bg))
+            .border_1()
+            .border_color(rgb(t.border))
+            .text_size(px(t.text_data_sm))
+            .text_color(rgb(t.fg1))
+            .cursor_pointer()
+            .hover(move |s| s.border_color(rgb(hb)).text_color(rgb(hf)))
+            .child("Add")
+            .on_click(move |_ev, window, cx| {
+                app.update(cx, |this, cx| this.settings_add_pull_only(window, cx));
+            })
+    };
+    col = col.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .mt(px(4.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(Input::new(&s.add_pull_only)),
+            )
+            .child(add_po),
+    );
+
     // Scan depth stepper + ignore field.
     col = col.child(number_row("Scan depth", &s.scan_depth, t));
     col.child(labeled("Ignore (comma-separated)", s.ignore.clone(), t))
@@ -537,6 +624,18 @@ fn launchers_section(s: &SettingsState, t: &Theme) -> impl IntoElement {
         .child(labeled(
             "Agent dispatch args ({prompt} = task)",
             s.agent_dispatch.clone(),
+            t,
+        ))
+        .child(labeled(
+            "External diff command ({path} = repo, {file} = selected path)",
+            s.diff_command.clone(),
+            t,
+        ))
+        .child(note_line(
+            SharedString::from(
+                "Changes → Open external diff launches this tool (default: meld, or code / xdg-open).",
+            ),
+            t.fg3,
             t,
         ))
 }
@@ -765,6 +864,13 @@ fn ai_status_block(
             }
         }));
     block = block.child(head);
+    block = block.child(note_line(
+        SharedString::from(
+            "If Generate commit returns empty or errors about the llama runner, restart Ollama (`systemctl restart ollama`) then Test again. Prefer qwen2.5:3b (or larger) over tiny 0.6b models for commit bodies.",
+        ),
+        t.fg3,
+        t,
+    ));
     if !s.ai_note.is_empty() {
         block = block.child(note_line(s.ai_note.clone(), t.fg2, t));
     }

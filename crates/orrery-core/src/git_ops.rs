@@ -134,6 +134,7 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
     let mut dirty = 0u32;
     let mut staged = 0u32;
     let mut unstaged = 0u32;
+    let mut conflicts = 0u32;
     if let Ok(statuses) = repo.statuses(Some(&mut opts)) {
         for e in statuses.iter() {
             let s = e.status();
@@ -141,6 +142,9 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
                 continue;
             }
             dirty += 1;
+            if s.is_conflicted() {
+                conflicts += 1;
+            }
             let index_change = s.is_index_new()
                 || s.is_index_modified()
                 || s.is_index_deleted()
@@ -166,6 +170,7 @@ pub(crate) fn status_of(repo: &Repository) -> GitStatus {
         dirty,
         staged,
         unstaged,
+        conflicts,
     }
 }
 

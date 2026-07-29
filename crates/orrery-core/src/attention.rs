@@ -20,8 +20,12 @@ use crate::model::{Host, Repo};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AttentionKind {
+    /// Unresolved merge/rebase conflict paths in the index.
+    MergeConflict,
     /// The latest default-branch CI run failed.
     CiFailing,
+    /// Upstream CI is red on a pull-only checkout — informational only.
+    UpstreamCi,
     /// A PR is waiting on your review.
     ReviewRequested,
     /// A coding-agent session finished and its output awaits you.
@@ -73,11 +77,14 @@ impl AttentionKind {
     ///   a passive readout, not a call to action.
     pub fn severity(self) -> Severity {
         match self {
-            AttentionKind::CiFailing | AttentionKind::ReviewRequested => Severity::Urgent,
+            AttentionKind::MergeConflict
+            | AttentionKind::CiFailing
+            | AttentionKind::ReviewRequested => Severity::Urgent,
             AttentionKind::AgentFinished | AttentionKind::DirtyWorktree | AttentionKind::Ahead => {
                 Severity::Attention
             }
-            AttentionKind::Behind
+            AttentionKind::UpstreamCi
+            | AttentionKind::Behind
             | AttentionKind::PrAssigned
             | AttentionKind::PrunableBranches
             | AttentionKind::AgentRunning => Severity::Info,
@@ -89,7 +96,9 @@ impl AttentionKind {
     /// toggles ("Review requested", "Agent finished").
     pub fn label(self) -> &'static str {
         match self {
+            AttentionKind::MergeConflict => "Merge conflict",
             AttentionKind::CiFailing => "CI failing",
+            AttentionKind::UpstreamCi => "Upstream CI",
             AttentionKind::ReviewRequested => "Review requested",
             AttentionKind::AgentFinished => "Agent finished",
             AttentionKind::DirtyWorktree => "Uncommitted changes",
@@ -104,10 +113,12 @@ impl AttentionKind {
     /// What the user should do — shown in Mission Control subtitles.
     pub fn action_hint(self) -> &'static str {
         match self {
+            AttentionKind::MergeConflict => "Open in IDE to resolve",
             AttentionKind::CiFailing => "Open CI on the host",
+            AttentionKind::UpstreamCi => "Ignore (pull-only)",
             AttentionKind::ReviewRequested => "Review the PR",
             AttentionKind::AgentFinished => "Review agent output",
-            AttentionKind::DirtyWorktree => "Commit locally or discard",
+            AttentionKind::DirtyWorktree => "Discard or commit",
             AttentionKind::Ahead => "Push when ready",
             AttentionKind::Behind => "Pull to update",
             AttentionKind::PrAssigned => "Wait on reviewers / CI",
@@ -217,6 +228,14 @@ pub fn compute(
     // Local git state, straight off the scan snapshot.
     for repo in repos {
         let on_branch = || Some(format!("on {}", repo.git.branch));
+        if repo.git.conflicts > 0 {
+            items.push(item(
+                local_ref(repo),
+                AttentionKind::MergeConflict,
+                count(repo.git.conflicts, "merge conflict", "merge conflicts"),
+                on_branch(),
+            ));
+        }
         if repo.git.dirty > 0 {
             items.push(item(
                 local_ref(repo),
@@ -335,11 +354,17 @@ pub fn apply_pull_only_policy(
     use crate::model::path_is_pull_only;
     items
         .into_iter()
-        .filter_map(|mut item| {
+        .map(|mut item| {
             let path = item.repo.id.as_deref().unwrap_or("");
             let pull_only = path_is_pull_only(path, pull_only_prefixes);
             match item.kind {
-                AttentionKind::CiFailing if pull_only => None,
+                AttentionKind::CiFailing if pull_only => {
+                    item.kind = AttentionKind::UpstreamCi;
+                    item.severity = AttentionKind::UpstreamCi.severity();
+                    item.summary = "Upstream CI failing — ignore (pull-only)".into();
+                    item.detail = Some("CI on upstream remotes is not your fix".into());
+                    item
+                }
                 AttentionKind::Ahead if pull_only => {
                     item.summary = item
                         .summary
@@ -347,15 +372,15 @@ pub fn apply_pull_only_policy(
                     if item.detail.is_none() {
                         item.detail = Some("upstream / pull-only checkout".into());
                     }
-                    Some(item)
+                    item
                 }
                 AttentionKind::Behind => {
                     if !item.summary.to_lowercase().contains("pull") {
                         item.summary = format!("{} — Pull to update", item.summary);
                     }
-                    Some(item)
+                    item
                 }
-                _ => Some(item),
+                _ => item,
             }
         })
         .collect()
@@ -524,6 +549,23 @@ mod tests {
         assert_eq!(items[0].summary, "3 uncommitted changes");
         assert_eq!(items[0].detail.as_deref(), Some("on main"));
         assert_eq!(items[0].repo.id.as_deref(), Some("/a"));
+    }
+
+    #[test]
+    fn merge_conflict_triggers_urgent() {
+        let mut r = repo("/a");
+        r.git.conflicts = 2;
+        r.git.dirty = 2;
+        let items = compute_repos(&[r]);
+        assert!(items
+            .iter()
+            .any(|i| i.kind == AttentionKind::MergeConflict && i.severity == Severity::Urgent));
+        let conflict = items
+            .iter()
+            .find(|i| i.kind == AttentionKind::MergeConflict)
+            .expect("merge conflict item");
+        assert_eq!(conflict.summary, "2 merge conflicts");
+        assert_eq!(conflict.kind.action_hint(), "Open in IDE to resolve");
     }
 
     #[test]
@@ -761,11 +803,13 @@ mod tests {
     fn every_kind_maps_to_its_documented_severity() {
         use AttentionKind::*;
         for (kind, severity) in [
+            (MergeConflict, Severity::Urgent),
             (CiFailing, Severity::Urgent),
             (ReviewRequested, Severity::Urgent),
             (AgentFinished, Severity::Attention),
             (DirtyWorktree, Severity::Attention),
             (Ahead, Severity::Attention),
+            (UpstreamCi, Severity::Info),
             (Behind, Severity::Info),
             (PrAssigned, Severity::Info),
             (PrunableBranches, Severity::Info),
@@ -779,7 +823,9 @@ mod tests {
     fn every_kind_has_a_chip_label() {
         use AttentionKind::*;
         for (kind, label) in [
+            (MergeConflict, "Merge conflict"),
             (CiFailing, "CI failing"),
+            (UpstreamCi, "Upstream CI"),
             (ReviewRequested, "Review requested"),
             (AgentFinished, "Agent finished"),
             (DirtyWorktree, "Uncommitted changes"),
@@ -797,9 +843,13 @@ mod tests {
     fn every_kind_has_an_action_hint() {
         use AttentionKind::*;
         assert_eq!(Behind.action_hint(), "Pull to update");
-        assert_eq!(DirtyWorktree.action_hint(), "Commit locally or discard");
+        assert_eq!(DirtyWorktree.action_hint(), "Discard or commit");
+        assert_eq!(UpstreamCi.action_hint(), "Ignore (pull-only)");
+        assert_eq!(MergeConflict.action_hint(), "Open in IDE to resolve");
         for kind in [
+            MergeConflict,
             CiFailing,
+            UpstreamCi,
             ReviewRequested,
             AgentFinished,
             DirtyWorktree,
@@ -814,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_only_policy_drops_ci_and_rewrites_ahead_behind() {
+    fn pull_only_policy_demotes_ci_and_rewrites_ahead_behind() {
         let items = vec![
             item(
                 local_ref(&repo("/work/core/enterprise")),
@@ -843,9 +893,13 @@ mod tests {
         ];
         let prefixes = vec!["/work/core".into()];
         let out = apply_pull_only_policy(items, &prefixes);
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|i| !(i.kind == AttentionKind::CiFailing
-            && i.repo.id.as_deref() == Some("/work/core/enterprise"))));
+        assert_eq!(out.len(), 4);
+        let upstream = out
+            .iter()
+            .find(|i| i.kind == AttentionKind::UpstreamCi)
+            .expect("pull-only CI demoted");
+        assert!(upstream.summary.contains("ignore"));
+        assert_eq!(upstream.severity, Severity::Info);
         let ahead = out
             .iter()
             .find(|i| i.kind == AttentionKind::Ahead)

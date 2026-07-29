@@ -18,13 +18,37 @@ under `odoo18` / `odoo19`, nested submodule trees such as `manooshaalreef`).
 - **TREE sidebar** — expandable parent → submodule children under GROUPS;
   click parent to focus Mission Control on parent + children; children hidden
   from the flat grid by default (avoids duplicating shared modules × N).
+- **Submodule Update** — Actions / context menu discovers children and
+  fast-forward-pulls each on its configured (or current) branch; the fleet toast
+  detail lists per-path outcomes (`path: pulled` / `skipped` / error).
 - **Action filters** — Mission Control chips **Stageable** (`unstaged > 0`),
   **Commitable** (`dirty > 0`), **Pushable** (`ahead > 0`), with counts; TREE
   keeps a parent visible when a child matches the active filter.
 - **Context menus** — right-click on repo cards, Mission Control **list** rows,
   and TREE rows: Open drawer, Stage all, Commit All…, Generate & commit
-  (shown only when `aiReady`), Push, Fetch, Pull.
-- **Fleet ops** — `FleetOp::StageAll` and `Push` for multi-select / selection bar.
+  (shown only when `aiReady`), Push, Fetch, Pull, Update submodules.
+- **Actions ⚙** — toolbar gear dropdown for fleet Stage / Commit / Push /
+  Fetch / Pull / Discard / Reset / Submodule Update / Prune on the selection.
+- **Fleet Discard** — discard working-tree changes (with confirm) across the
+  selection; keeps commits.
+- **Pull behind** — toolbar / palette action fleet-pulls every repo with
+  `behind > 0` (upstream checkouts stay current without hunting chips).
+- **Pull-only prefixes** — Settings editor for upstream path prefixes: Pull to
+  update, hide Push, demote upstream CI to Info; digits modules outside the list
+  stay Pushable.
+- **Attention chips** — Mission Control cards/list show top reason badges plus a
+  suggested-action subtitle; **Merge conflict** is Urgent; empty Attention filter
+  shows **All clear**.
+- **External diff** — Changes drawer **Open external diff** runs
+  `diff_command` (`{path}` / `{file}`; default detects `meld` / `code` /
+  `xdg-open`).
+- **Terminal launcher** — open a configured terminal / agent command at the repo.
+- **AI commit** — Generate & commit (fleet + drawer) when `aiReady`; Settings
+  notes restarting Ollama and preferring `qwen2.5:3b`+.
+- **Fleet shortcuts** — <kbd>Ctrl/Cmd+Shift+F</kbd> Fetch selected,
+  <kbd>Ctrl/Cmd+Shift+P</kbd> Pull selected.
+- **Fleet ops** — `FleetOp::StageAll`, `Push`, `Fetch`, `Pull`, `Discard`,
+  `SubmoduleUpdate`, and related multi-select bar actions.
 - **Smart “+” add flow** — header **+** opens one modal with tabs: Add local
   path (single repo **or** scan folder), Clone from GitHub, New repository
   (shared `prepare_workspace_root` with Settings).
@@ -47,6 +71,8 @@ under `odoo18` / `odoo19`, nested submodule trees such as `manooshaalreef`).
 - **Repo name filter** — Mission Control toolbar query (`grid.query`) filters by
   name / slug / path.
 - **Workspace groups** — GROUPS section with Fetch / Pull on the active group.
+- **CI 403** — soft Info toast (not sticky Error); when the hint mentions org
+  SSO, the toast links to Authorize SSO / the OAuth app settings page.
 
 ### Fixed
 
@@ -65,6 +91,9 @@ under `odoo18` / `odoo19`, nested submodule trees such as `manooshaalreef`).
 | Explore | ![Explore](docs/public/shots/explore.png) |
 | List view | ![List view](docs/public/shots/list-view.png) |
 | Header before contrast fix (reference) | ![Header before](docs/public/shots/header-before-contrast-fix.png) |
+
+> When re-capturing shots, keep private repos and machine-specific home paths out
+> of published images (use generic `~/dev/…` layouts).
 
 ---
 

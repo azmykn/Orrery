@@ -33,6 +33,9 @@ pub struct GitStatus {
     /// Paths with working-tree changes vs the index (incl. untracked).
     #[serde(default)]
     pub unstaged: u32,
+    /// Paths currently in an unresolved merge/rebase conflict.
+    #[serde(default)]
+    pub conflicts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,9 +200,14 @@ pub struct AppConfig {
     pub active_workspace_group: Option<String>,
     /// Absolute path prefixes for upstream / vendor checkouts you Pull but
     /// do not Push (e.g. Odoo `core/` + `custom/`). Repos under these paths
-    /// skip CI-failure attention and hide Push; Behind still prompts Pull.
+    /// demote upstream CI to Info and hide Push; Behind still prompts Pull.
     #[serde(default)]
     pub pull_only_prefixes: Vec<String>,
+    /// External diff/merge tool for the Changes drawer. `{path}` = repo dir;
+    /// `{file}` = selected relative path when available. Empty → detect `meld`
+    /// / `code` / `xdg-open`.
+    #[serde(default = "default_diff_command")]
+    pub diff_command: String,
 }
 
 /// A named set of repos matched by absolute path prefixes (e.g. odoo19/core).
@@ -252,6 +260,17 @@ pub(crate) fn default_embed_model() -> String {
 
 pub(crate) fn default_true() -> bool {
     true
+}
+
+pub fn default_diff_command() -> String {
+    // Prefer a real folder diff tool; fall back to opening the path.
+    if which::which("meld").is_ok() {
+        "meld {path}".into()
+    } else if which::which("code").is_ok() {
+        "code --diff {path}".into()
+    } else {
+        "xdg-open {path}".into()
+    }
 }
 
 #[cfg(test)]

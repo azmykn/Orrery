@@ -391,7 +391,7 @@ pub fn render(
         }
         AgentsState::Ready(data) if data.sessions.is_empty() && data.dispatched.is_empty() => {
             super::note(
-                "No agent sessions running. Launch or dispatch one from a repo's drawer.",
+                "No agent sessions running. Launch from a card, or dispatch a worktree agent from the drawer — finished worktrees show here for review.",
                 t,
             )
             .into_any_element()

@@ -26,7 +26,14 @@ submodules). Highlights:
 | | |
 |---|---|
 | **Submodule TREE** | Sidebar tree of parents → checked-out submodules; grid hides children by default |
-| **Stageable / Commitable / Pushable** | Action chips + right-click on cards **and list** rows (Generate & commit when AI is ready) |
+| **Submodule Update** | Discover + pull each child on its branch; toast lists per-path results |
+| **Actions ⚙ / Discard** | Fleet Stage, Commit, Push, Fetch, Pull, Discard, Reset from the toolbar gear |
+| **Pull behind** | One action pulls every repo that is behind upstream |
+| **Pull-only paths** | Settings prefixes for upstream trees (Pull, no Push; upstream CI demoted) |
+| **Attention chips** | Reason badges + suggested actions; merge conflicts Urgent; empty → All clear |
+| **External diff** | Changes drawer opens `meld` / configured `diff_command` |
+| **Terminal + AI commit** | Terminal/agent launcher; Generate & commit when `aiReady` |
+| **Stageable / Commitable / Pushable** | Action chips + right-click on cards **and list** rows |
 | **Smart +** | One dark **+** chip → tabbed modal: Add local path / Clone from GitHub / New repository |
 | **Top tabs** | Primary nav as horizontal tabs; sidebar stays GROUPS / TREE / ROOTS / … |
 | **Readable chrome** | Window min/max/close and header **+** load gpui-component icons with clearer contrast |
@@ -150,12 +157,15 @@ The four original phases are substantially in place:
 DigitsCode fork (in tree / recent):
 
 - ✅ Submodule scan + TREE sidebar + hide-children grid.
+- ✅ Submodule Update (discover + pull on branch) + Pull behind + pull-only prefixes.
+- ✅ Actions ⚙ fleet bar (Fetch/Pull/Discard/…) + attention chips + external diff.
 - ✅ Stageable / Commitable / Pushable filters + context menus (grid + list) + fleet Stage/Push.
 - ✅ Smart **+** tabbed modal (path / clone / new repo); Commit All from working tree.
 - ✅ Top tabs chrome; visible TitleBar / header action icons.
 
-Next up and ongoing work lives in [the issue list](../../issues). Out of scope for
-the current fork pass: automatic `git submodule update --init`.
+Next up and ongoing work lives in [the issue list](../../issues). For scan/grid
+paint cost on large fleets, see [docs/rendering-performance.md](docs/rendering-performance.md)
+(native GPUI notes + why flat design stays a performance contract).
 
 ## License
 

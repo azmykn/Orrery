@@ -4,6 +4,10 @@ Mission Control is the home view: a windowed grid of every repo Orrery found acr
 
 ![Mission Control — the repo grid](/shots/mission-control.png)
 
+> **Screenshots:** when re-capturing docs shots, avoid private remotes and
+> machine-specific home paths in published images (prefer generic `~/dev/…`
+> layouts).
+
 ## The repo card
 
 Each card fuses local git state with host enrichment and an optional AI summary:
@@ -20,8 +24,9 @@ Each card fuses local git state with host enrichment and an optional AI summary:
 The toolbar and chip row narrow the grid:
 
 - **Visibility** — `All` / `Public` / `Private`. Public means a non-private remote; private covers private remotes *and* local-only repos (which aren't published anywhere).
-- **Chips** — `Dirty`, `Ahead`, `Starred`, `Stale` (multi-select).
-- **Attention** — a quick toggle for repos that need it: uncommitted work, unpushed/behind commits, or no recent activity.
+- **Chips** — `Dirty`, `Ahead`, `Starred`, `Stale`, Stageable / Commitable / Pushable (multi-select).
+- **Attention** — repos that need action (merge conflicts, reviews, dirty work, behind, …). Cards show reason badges and a suggested-action line; an empty filter shows **All clear**.
+- **Pull behind** — toolbar action that fleet-pulls every repo currently behind upstream.
 - **Sort** — by Activity, Name, or Stars.
 - **Roots & Languages** — the sidebar filters by workspace root and detected language.
 
@@ -37,6 +42,13 @@ The sidebar adds two ways to carve up a large workspace:
 ## Selecting repos
 
 Each card has a checkbox; select one or more (or use the toolbar's select-all) to bring up the **fleet bar** for batch git operations across the selection. See [Fleet operations](./fleet).
+
+The toolbar **Actions ⚙** menu runs the same fleet ops (Fetch, Pull, Stage, Commit, Discard, Submodule Update, …). Keyboard shortcuts on the current selection:
+
+- <kbd>Ctrl/Cmd+Shift+F</kbd> — Fetch selected
+- <kbd>Ctrl/Cmd+Shift+P</kbd> — Pull selected
+
+**Pull behind** (toolbar / command palette) selects every repo with `behind > 0` and fleet-pulls them — useful for upstream Odoo/core trees you keep current without hunting the Behind chip. Pair with **pull-only prefixes** in Settings so those trees never offer Push and upstream CI stays Info-severity.
 
 ## List view
 

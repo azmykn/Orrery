@@ -193,6 +193,7 @@ impl Default for AppConfig {
             workspace_groups: Vec::new(),
             active_workspace_group: None,
             pull_only_prefixes: Vec::new(),
+            diff_command: crate::model::default_diff_command(),
         }
     }
 }

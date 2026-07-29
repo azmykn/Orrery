@@ -47,7 +47,9 @@ actions!(
         OpenPalette,
         PaletteUp,
         PaletteDown,
-        PaletteConfirm
+        PaletteConfirm,
+        FleetFetchSelected,
+        FleetPullSelected
     ]
 );
 
@@ -100,6 +102,11 @@ fn main() {
                 KeyBinding::new("up", PaletteUp, Some("Palette")),
                 KeyBinding::new("down", PaletteDown, Some("Palette")),
                 KeyBinding::new("enter", PaletteConfirm, Some("Palette")),
+                // Fleet fetch / pull on the current selection (Mission Control).
+                KeyBinding::new("cmd-shift-f", FleetFetchSelected, None),
+                KeyBinding::new("ctrl-shift-f", FleetFetchSelected, None),
+                KeyBinding::new("cmd-shift-p", FleetPullSelected, None),
+                KeyBinding::new("ctrl-shift-p", FleetPullSelected, None),
             ]);
 
             let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
