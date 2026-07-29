@@ -1221,40 +1221,189 @@ pub fn commit_all(path: &str, message: &str) -> Result<String, String> {
     commit(path, message)
 }
 
-/// `git submodule update --init --recursive` for a parent repo.
+/// Discover submodules from `.gitmodules` and fast-forward-pull each on its
+/// tracking branch — **not** a bare `git submodule update` (which only checks
+/// out the parent's recorded SHAs).
 ///
-/// Initializes missing checkouts and updates existing ones to the commit
-/// recorded in the parent. Returns a short summary; skips (via Err with a
-/// recognizable message callers map to Skip) when `.gitmodules` is absent.
+/// Per submodule:
+/// 1. `git submodule update --init -- <path>` when the checkout is missing
+/// 2. Branch: `.gitmodules` `branch = …` if set, else the current HEAD branch
+/// 3. Checkout that branch if needed (never discards a dirty tree — skips)
+/// 4. Fetch + `pull` fast-forward-only (same rules as [`pull`])
+///
+/// Returns a per-path summary for the fleet toast. Err `"no submodules"` when
+/// nothing is declared (callers map that to Skip). Any hard failure in a child
+/// fails the whole op with the combined summary.
 pub fn submodule_update(path: &str) -> Result<String, String> {
     let root = std::path::Path::new(path);
     if !root.join(".gitmodules").is_file() {
         return Err("no submodules".into());
     }
-    let declared = crate::scan::submodule_paths(root);
-    if declared.is_empty() {
+    let entries = crate::scan::submodule_entries(root);
+    if entries.is_empty() {
         return Err("no submodules".into());
     }
-    let result = run_command(path, "git submodule update --init --recursive")?;
-    if !result.ok {
-        let detail = result.output_tail.trim();
+
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len());
+    let mut hard_fail = false;
+    for entry in &entries {
+        match pull_one_submodule(path, &entry.path, entry.branch.as_deref()) {
+            Ok(msg) => parts.push(msg),
+            Err(e) => {
+                hard_fail = true;
+                parts.push(format!("{}: {e}", entry.path));
+            }
+        }
+    }
+    let summary = parts.join("; ");
+    if hard_fail {
+        Err(summary)
+    } else {
+        Ok(summary)
+    }
+}
+
+/// Init (if needed), resolve branch, checkout, then ff-only pull one submodule.
+fn pull_one_submodule(
+    parent: &str,
+    rel: &str,
+    configured_branch: Option<&str>,
+) -> Result<String, String> {
+    let abs = std::path::Path::new(parent).join(rel);
+    let freshly_inited = ensure_submodule_checkout(parent, rel, &abs)?;
+    let abs_str = abs
+        .to_str()
+        .ok_or_else(|| format!("{rel}: invalid submodule path"))?;
+
+    // Fetch first so a configured branch can be created from origin/<branch>
+    // when the checkout is still detached at the parent's recorded SHA.
+    let _ = fetch(abs_str)?;
+
+    let target = match submodule_target_branch(abs_str, configured_branch)? {
+        Some(b) => b,
+        None => {
+            let note = if freshly_inited {
+                format!("{rel}: initialized; skipped pull (detached HEAD, no branch configured)")
+            } else {
+                format!("{rel}: skipped (detached HEAD, no branch configured)")
+            };
+            return Ok(note);
+        }
+    };
+
+    match ensure_submodule_on_branch(abs_str, &target)? {
+        OpOutcome::Skipped(r) => {
+            let note = if freshly_inited {
+                format!("{rel}: initialized; skipped ({r})")
+            } else {
+                format!("{rel}: skipped ({r})")
+            };
+            return Ok(note);
+        }
+        OpOutcome::Done(_) => {}
+    }
+
+    match pull(abs_str)? {
+        OpOutcome::Done(s) => Ok(format!("{rel}: {s}")),
+        OpOutcome::Skipped(r) => {
+            if freshly_inited {
+                Ok(format!("{rel}: initialized; skipped pull ({r})"))
+            } else {
+                Ok(format!("{rel}: skipped ({r})"))
+            }
+        }
+    }
+}
+
+/// `git submodule update --init -- <rel>` when the worktree isn't a usable repo.
+/// Returns whether an init was performed.
+fn ensure_submodule_checkout(
+    parent: &str,
+    rel: &str,
+    abs: &std::path::Path,
+) -> Result<bool, String> {
+    if Repository::open(abs).is_ok() {
+        return Ok(false);
+    }
+    let output = std::process::Command::new("git")
+        .args(["submodule", "update", "--init", "--", rel])
+        .current_dir(parent)
+        .output()
+        .map_err(|e| format!("git submodule update --init: {e}"))?;
+    if !output.status.success() {
+        let mut combined = String::from_utf8_lossy(&output.stderr).into_owned();
+        if combined.trim().is_empty() {
+            combined = String::from_utf8_lossy(&output.stdout).into_owned();
+        }
+        let detail = combined.trim();
         return Err(if detail.is_empty() {
             format!(
-                "submodule update failed{}",
-                result
-                    .code
+                "submodule init failed{}",
+                output
+                    .status
+                    .code()
                     .map(|c| format!(" (exit {c})"))
                     .unwrap_or_default()
             )
         } else {
-            detail.to_string()
+            format!("submodule init failed: {}", tail_lines(detail, 4))
         });
     }
-    let n = declared.len();
-    Ok(format!(
-        "updated {n} submodule{}",
-        if n == 1 { "" } else { "s" }
-    ))
+    if Repository::open(abs).is_err() {
+        return Err("submodule init did not produce a checkout".into());
+    }
+    Ok(true)
+}
+
+/// Prefer `.gitmodules` `branch`, else the current HEAD branch name.
+fn submodule_target_branch(
+    sub_path: &str,
+    configured: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(b) = configured.map(str::trim).filter(|b| !b.is_empty()) {
+        return Ok(Some(b.to_string()));
+    }
+    let repo = Repository::open(sub_path).map_err(|e| e.to_string())?;
+    let head = repo.head().map_err(|e| e.to_string())?;
+    if !head.is_branch() {
+        return Ok(None);
+    }
+    Ok(head.shorthand().map(String::from))
+}
+
+/// Check out `branch` in the submodule without discarding dirty work.
+/// Creates a local tracking branch from `origin/<branch>` when needed.
+fn ensure_submodule_on_branch(sub_path: &str, branch: &str) -> Result<OpOutcome, String> {
+    let repo = Repository::open(sub_path).map_err(|e| e.to_string())?;
+    if let Ok(head) = repo.head() {
+        if head.is_branch() && head.shorthand() == Some(branch) {
+            return Ok(OpOutcome::Done(format!("on {branch}")));
+        }
+    }
+    if status_of(&repo).dirty > 0 {
+        return Ok(OpOutcome::Skipped(SKIP_DIRTY.into()));
+    }
+
+    if repo.find_branch(branch, BranchType::Local).is_ok() {
+        switch_branch(sub_path, branch)?;
+        return Ok(OpOutcome::Done(format!("checked out {branch}")));
+    }
+
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let remote = repo
+        .find_reference(&remote_ref)
+        .map_err(|_| format!("branch '{branch}' not found locally or on origin"))?;
+    let oid = remote
+        .target()
+        .ok_or_else(|| format!("origin/{branch} has no tip"))?;
+    let commit = repo.find_commit(oid).map_err(|e| e.to_string())?;
+    let mut local = repo
+        .branch(branch, &commit, false)
+        .map_err(|e| e.to_string())?;
+    // Best-effort upstream; checkout still proceeds if set_upstream fails.
+    let _ = local.set_upstream(Some(&format!("origin/{branch}")));
+    switch_branch(sub_path, branch)?;
+    Ok(OpOutcome::Done(format!("checked out {branch}")))
 }
 
 /// Push the current branch to its upstream remote; with no upstream, push to
@@ -2131,36 +2280,35 @@ mod tests {
         assert_eq!(submodule_update(&path).unwrap_err(), "no submodules");
     }
 
+    /// Commit `msg` on the current HEAD of `path` (helper for submodule fixtures).
+    fn head_branch(path: &str) -> String {
+        let repo = Repository::open(path).unwrap();
+        let head = repo.head().unwrap();
+        head.shorthand().unwrap().to_string()
+    }
+
     #[test]
     fn submodule_update_inits_declared_child() {
         // Local path submodule: register via `git submodule add`, wipe the
-        // checkout, then `submodule_update` re-inits it. Newer git blocks the
-        // `file` transport by default — pass `-c protocol.file.allow=always`
-        // on add, and store the same in the parent repo so update inherits it.
+        // checkout, then `submodule_update` re-inits and pulls on the branch.
+        // Newer git blocks the `file` transport by default — pass
+        // `-c protocol.file.allow=always` on add, and store the same in the
+        // parent repo so update inherits it.
         let (_child_dir, child_path) = init_repo();
-        fs::write(std::path::Path::new(&child_path).join("lib.txt"), "lib").unwrap();
-        // Second commit so the submodule tip has a distinctive file.
-        let child_repo = Repository::open(&child_path).unwrap();
-        let mut index = child_repo.index().unwrap();
-        index.add_path(std::path::Path::new("lib.txt")).unwrap();
-        index.write().unwrap();
-        let tree = child_repo.find_tree(index.write_tree().unwrap()).unwrap();
-        let sig = child_repo.signature().unwrap();
-        let parent_commit = child_repo.head().unwrap().peel_to_commit().unwrap();
-        child_repo
-            .commit(Some("HEAD"), &sig, &sig, "lib", &tree, &[&parent_commit])
-            .unwrap();
+        commit_file(&child_path, "lib.txt", "lib", "lib");
+        let branch = head_branch(&child_path);
 
         let (_parent_dir, parent_path) = init_repo();
         let allow = run_command(&parent_path, "git config protocol.file.allow always").unwrap();
         assert!(allow.ok, "config failed: {}", allow.output_tail);
-        // `run_command` splits on whitespace, so pass `-c` via a direct spawn.
         let add = std::process::Command::new("git")
             .args([
                 "-c",
                 "protocol.file.allow=always",
                 "submodule",
                 "add",
+                "-b",
+                &branch,
                 &child_path,
                 "vendor/lib",
             ])
@@ -2178,10 +2326,103 @@ mod tests {
         assert!(!checkout.join(".git").exists());
 
         let msg = submodule_update(&parent_path).unwrap();
-        assert_eq!(msg, "updated 1 submodule");
+        assert!(
+            msg.contains("vendor/lib:"),
+            "expected per-path summary, got {msg}"
+        );
         assert!(
             checkout.join("lib.txt").is_file(),
-            "child should be checked out after update --init"
+            "child should be checked out after init + pull"
+        );
+        // On the configured branch (not detached at a recorded SHA only).
+        assert_eq!(head_branch(checkout.to_str().unwrap()), branch);
+    }
+
+    #[test]
+    fn submodule_update_pulls_new_commits_on_configured_branch() {
+        let (_child_dir, child_path) = init_repo();
+        let branch = head_branch(&child_path);
+
+        let (_parent_dir, parent_path) = init_repo();
+        let allow = run_command(&parent_path, "git config protocol.file.allow always").unwrap();
+        assert!(allow.ok, "config failed: {}", allow.output_tail);
+        let add = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                &branch,
+                &child_path,
+                "vendor/lib",
+            ])
+            .current_dir(&parent_path)
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "submodule add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+
+        // Advance the submodule remote tip after the parent recorded its SHA.
+        commit_file(&child_path, "newer.txt", "n", "newer");
+
+        let checkout = std::path::Path::new(&parent_path).join("vendor/lib");
+        assert!(!checkout.join("newer.txt").is_file());
+
+        let msg = submodule_update(&parent_path).unwrap();
+        assert!(
+            msg.contains("fast-forwarded") || msg.contains("up to date"),
+            "expected pull outcome, got {msg}"
+        );
+        assert!(
+            checkout.join("newer.txt").is_file(),
+            "submodule should fast-forward onto the new tip; msg={msg}"
+        );
+    }
+
+    #[test]
+    fn submodule_update_skips_dirty_submodule() {
+        let (_child_dir, child_path) = init_repo();
+        let branch = head_branch(&child_path);
+
+        let (_parent_dir, parent_path) = init_repo();
+        let allow = run_command(&parent_path, "git config protocol.file.allow always").unwrap();
+        assert!(allow.ok);
+        let add = std::process::Command::new("git")
+            .args([
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-b",
+                &branch,
+                &child_path,
+                "vendor/lib",
+            ])
+            .current_dir(&parent_path)
+            .output()
+            .unwrap();
+        assert!(
+            add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+
+        let checkout = std::path::Path::new(&parent_path).join("vendor/lib");
+        fs::write(checkout.join("README.md"), "# dirty").unwrap();
+        commit_file(&child_path, "remote.txt", "r", "remote tip");
+
+        let msg = submodule_update(&parent_path).unwrap();
+        assert!(
+            msg.contains("uncommitted changes") || msg.contains("skipped"),
+            "expected dirty skip, got {msg}"
+        );
+        assert!(
+            !checkout.join("remote.txt").is_file(),
+            "dirty submodule must not be overwritten"
         );
     }
 }

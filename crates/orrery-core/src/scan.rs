@@ -264,26 +264,76 @@ fn build_repo(
     })
 }
 
+/// One `[submodule]` entry from `.gitmodules`: checkout path plus optional
+/// tracking `branch = …` (used by fleet "Update submodules" to pull tips).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmoduleEntry {
+    pub path: String,
+    pub branch: Option<String>,
+}
+
 /// Repo-relative submodule paths declared in `.gitmodules` (empty if missing).
 pub fn submodule_paths(repo: &Path) -> Vec<String> {
+    submodule_entries(repo)
+        .into_iter()
+        .map(|e| e.path)
+        .collect()
+}
+
+/// Parse `.gitmodules` into path + optional `branch` per submodule section.
+pub fn submodule_entries(repo: &Path) -> Vec<SubmoduleEntry> {
     let text = match std::fs::read_to_string(repo.join(".gitmodules")) {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
+    let mut cur_path: Option<String> = None;
+    let mut cur_branch: Option<String> = None;
+    let mut in_sub = false;
+
+    let flush =
+        |out: &mut Vec<SubmoduleEntry>, path: &mut Option<String>, branch: &mut Option<String>| {
+            if let Some(p) = path.take() {
+                if !p.is_empty() && !p.contains('\0') {
+                    out.push(SubmoduleEntry {
+                        path: p,
+                        branch: branch.take().filter(|b| !b.is_empty()),
+                    });
+                }
+            }
+            *branch = None;
+        };
+
     for line in text.lines() {
         let t = line.trim();
-        let Some(rest) = t
+        if t.starts_with('[') {
+            if in_sub {
+                flush(&mut out, &mut cur_path, &mut cur_branch);
+            }
+            in_sub = t.to_ascii_lowercase().starts_with("[submodule");
+            continue;
+        }
+        if !in_sub {
+            continue;
+        }
+        if let Some(rest) = t
             .strip_prefix("path")
             .map(|s| s.trim_start())
             .and_then(|s| s.strip_prefix('='))
             .map(|s| s.trim())
-        else {
-            continue;
-        };
-        if !rest.is_empty() && !rest.contains('\0') {
-            out.push(rest.to_string());
+        {
+            cur_path = Some(rest.to_string());
+        } else if let Some(rest) = t
+            .strip_prefix("branch")
+            .map(|s| s.trim_start())
+            .and_then(|s| s.strip_prefix('='))
+            .map(|s| s.trim())
+        {
+            cur_branch = Some(rest.to_string());
         }
+    }
+    if in_sub {
+        flush(&mut out, &mut cur_path, &mut cur_branch);
     }
     out
 }
@@ -916,6 +966,32 @@ mod tests {
         assert_eq!(
             paths,
             vec!["vendor/tools".to_string(), "vendor/hr".to_string()]
+        );
+    }
+
+    #[test]
+    fn submodule_entries_reads_optional_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join(".gitmodules"),
+            "[submodule \"tools\"]\n\tpath = vendor/tools\n\tbranch = develop\n\
+             [submodule \"hr\"]\n\tpath = vendor/hr\n\turl = git@x:hr.git\n",
+        )
+        .unwrap();
+        let entries = submodule_entries(root);
+        assert_eq!(
+            entries,
+            vec![
+                SubmoduleEntry {
+                    path: "vendor/tools".into(),
+                    branch: Some("develop".into()),
+                },
+                SubmoduleEntry {
+                    path: "vendor/hr".into(),
+                    branch: None,
+                },
+            ]
         );
     }
 

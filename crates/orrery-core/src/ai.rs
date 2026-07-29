@@ -156,12 +156,40 @@ pub fn is_embedding_model(name: &str) -> bool {
     n.contains("embed") || n.contains("minilm") || n.starts_with("bge") || n.contains("/bge")
 }
 
+/// True when an installed model name matches the preferred config value.
+/// Exact match first; also accepts a bare name matching a tagged install
+/// (`qwen2.5` → `qwen2.5:3b`) so a mistyped/untagged Settings value doesn't
+/// silently fall back to the smallest leftover model (often a thinking tiny).
+fn model_name_matches(preferred: &str, installed: &str) -> bool {
+    if preferred == installed {
+        return true;
+    }
+    let pref = preferred.trim();
+    let inst = installed.trim();
+    if pref.is_empty() || inst.is_empty() {
+        return false;
+    }
+    // Config without tag: "qwen2.5" matches "qwen2.5:3b" / "qwen2.5:latest".
+    if !pref.contains(':') {
+        return inst == pref || inst.starts_with(&format!("{pref}:"));
+    }
+    // Config with tag: also accept installed bare name equal to the family.
+    if !inst.contains(':') {
+        let fam = pref.split(':').next().unwrap_or(pref);
+        return inst == fam;
+    }
+    false
+}
+
 /// Choose the chat model: the preferred one if installed, otherwise the smallest
 /// installed model that can actually generate (embedding models are excluded —
 /// picking one would 400 on /api/generate). Pure for testing.
 pub fn pick_model(preferred: &str, available: &[(String, u64)]) -> Option<String> {
-    if available.iter().any(|(name, _)| name == preferred) {
-        return Some(preferred.to_string());
+    if let Some((name, _)) = available
+        .iter()
+        .find(|(name, _)| model_name_matches(preferred, name))
+    {
+        return Some(name.clone());
     }
     available
         .iter()
@@ -213,15 +241,26 @@ fn likely_thinking_model(model: &str) -> bool {
 /// token budget on hidden reasoning. Other models try without the field first;
 /// if the response is empty, we retry once with `think:false` — that way plain
 /// models that might reject the field are never hit with it unnecessarily.
+///
+/// An empty final `response` is always an error — callers must not treat blank
+/// Ok as a successful commit/summary (that used to wipe the drawer inputs).
 async fn ollama_generate(model: &str, prompt: &str, num_predict: u32) -> Result<String, String> {
-    if likely_thinking_model(model) {
-        return generate_once(model, prompt, true, num_predict).await;
+    let text = if likely_thinking_model(model) {
+        generate_once(model, prompt, true, num_predict).await?
+    } else {
+        let first = generate_once(model, prompt, false, num_predict).await?;
+        if !first.is_empty() {
+            first
+        } else {
+            generate_once(model, prompt, true, num_predict).await?
+        }
+    };
+    if text.is_empty() {
+        return Err(format!(
+            "model {model} returned an empty response — try another model or raise the token budget"
+        ));
     }
-    let first = generate_once(model, prompt, false, num_predict).await?;
-    if !first.is_empty() {
-        return Ok(first);
-    }
-    generate_once(model, prompt, true, num_predict).await
+    Ok(text)
 }
 
 async fn generate_once(
@@ -514,18 +553,55 @@ Diff:\n{}\n\nCommit message:",
     )
 }
 
+/// Strip a wrapping markdown code fence (``` / ```text) so models that ignore
+/// "no code fences" still yield a usable subject. Bare `trim_matches('`')` on a
+/// fence opener line would wipe the subject to "" and blank the drawer.
+fn strip_wrapping_fence(text: &str) -> &str {
+    let mut t = text.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        // Drop the optional language tag on the opening fence line.
+        t = match rest.find('\n') {
+            Some(i) => rest[i + 1..].trim_start(),
+            None => rest.trim_start_matches(|c: char| !c.is_whitespace()).trim(),
+        };
+        if let Some(i) = t.rfind("```") {
+            t = t[..i].trim_end();
+        }
+    }
+    t
+}
+
 /// Split an AI commit message into (subject, body): the first non-empty line
 /// (stripped of wrapping quotes/backticks) is the subject, everything after it
 /// is the body. Both come back trimmed; either may be empty.
 pub fn split_commit_message(text: &str) -> (String, String) {
-    let mut lines = text.trim().lines();
-    let subject = lines
-        .next()
-        .unwrap_or("")
-        .trim()
-        .trim_matches(['"', '`'])
-        .to_string();
-    let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    let text = strip_wrapping_fence(text);
+    let mut subject = String::new();
+    let mut rest: Vec<&str> = Vec::new();
+    let mut got_subject = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !got_subject {
+            if trimmed.is_empty() || trimmed.starts_with("```") {
+                continue;
+            }
+            subject = trimmed.trim_matches(['"', '`']).to_string();
+            if subject.is_empty() {
+                continue;
+            }
+            got_subject = true;
+            continue;
+        }
+        rest.push(line);
+    }
+    // Drop a trailing fence closer left in the body.
+    while rest
+        .last()
+        .is_some_and(|l| l.trim().is_empty() || l.trim().starts_with("```"))
+    {
+        rest.pop();
+    }
+    let body = rest.join("\n").trim().to_string();
     (subject, body)
 }
 
@@ -610,9 +686,26 @@ async fn generate_with_budget(prompt: &str, num_predict: u32) -> Result<String, 
 /// `repo_path` is the repo root used to read `__manifest__.py` when the diff
 /// touches it (so the version survives the diff character clamp). Pass `""`
 /// or any path when unknown — version still falls back to parsing the diff.
+///
+/// Returns `Err` when the model yields no usable subject (empty / fences-only),
+/// so the UI can toast instead of blanking the composer.
 pub async fn commit_message(repo_path: &str, diff: &str) -> Result<String, String> {
     let path = (!repo_path.is_empty()).then_some(repo_path);
-    generate_with_budget(&commit_prompt_with_context(diff, path), COMMIT_NUM_PREDICT).await
+    let raw =
+        generate_with_budget(&commit_prompt_with_context(diff, path), COMMIT_NUM_PREDICT).await?;
+    let (subject, body) = split_commit_message(&raw);
+    if subject.is_empty() {
+        return Err(
+            "AI returned no commit subject — try again or pick another model in Settings".into(),
+        );
+    }
+    // Re-join so callers that commit the raw string keep a clean subject/body
+    // (fences stripped). Subject-only is still valid.
+    if body.is_empty() {
+        Ok(subject)
+    } else {
+        Ok(format!("{subject}\n\n{body}"))
+    }
 }
 
 /// Summarize commit subjects into a markdown changelog.
@@ -688,6 +781,16 @@ mod tests {
         // preferred absent → smallest
         assert_eq!(pick_model("missing", &avail).as_deref(), Some("small:1b"));
         assert_eq!(pick_model("x", &[]), None);
+        // Untagged preferred still resolves a tagged install (avoids falling
+        // back to a leftover tiny thinking model).
+        assert_eq!(
+            pick_model(
+                "qwen2.5",
+                &[("qwen2.5:3b".into(), 1900), ("qwen3:0.6b".into(), 500)]
+            )
+            .as_deref(),
+            Some("qwen2.5:3b")
+        );
     }
 
     #[test]
@@ -762,6 +865,13 @@ mod tests {
         let (s, b) = split_commit_message("fix: a\nbody line");
         assert_eq!((s.as_str(), b.as_str()), ("fix: a", "body line"));
         assert_eq!(split_commit_message("  "), (String::new(), String::new()));
+        // Fenced model output must not wipe the subject (trim_matches on ```).
+        let (s, b) = split_commit_message("```\nfeat(foo): add bar\n\nWhy it changed.\n```");
+        assert_eq!(s, "feat(foo): add bar");
+        assert_eq!(b, "Why it changed.");
+        let (s, b) = split_commit_message("```text\nfix: z\n\nBody.\n```");
+        assert_eq!(s, "fix: z");
+        assert_eq!(b, "Body.");
     }
 
     #[test]

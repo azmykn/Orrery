@@ -214,8 +214,8 @@ pub fn push_op() -> impl Fn(&str) -> Outcome + Sync {
     }
 }
 
-/// `git submodule update --init --recursive` on each parent. Repos without a
-/// `.gitmodules` skip (not fail).
+/// Discover each parent's submodules and fast-forward-pull on the configured /
+/// current branch. Repos without a `.gitmodules` skip (not fail).
 pub fn submodule_update_op() -> impl Fn(&str) -> Outcome + Sync {
     |path| match git_ops::submodule_update(path) {
         Ok(s) => Outcome::Ok(s),

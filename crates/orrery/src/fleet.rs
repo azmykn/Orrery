@@ -65,7 +65,8 @@ pub enum FleetOp {
     Pull,
     StageAll,
     Push,
-    /// `git submodule update --init --recursive` on each selected parent.
+    /// Init missing submodule checkouts, then pull each on its configured /
+    /// current branch (not only the parent's recorded SHA).
     SubmoduleUpdate,
     /// Manual bulk commit — same user-typed message on every selected repo.
     /// Only started through the message strip ([`OrreryApp::confirm_fleet_commit`]).

@@ -1853,8 +1853,25 @@ impl OrreryApp {
             })
             .await;
             let _ = this.update(cx, |this, cx| match msg {
+                Ok(m) if m.trim().is_empty() => {
+                    this.push_toast(
+                        ToastKind::Error,
+                        "Generate failed",
+                        Some("AI returned an empty commit message.".into()),
+                        cx,
+                    );
+                }
                 Ok(m) => {
                     let subject = crate::data::oneline(orrery_core::ai::split_commit_message(&m).0);
+                    if subject.is_empty() {
+                        this.push_toast(
+                            ToastKind::Error,
+                            "Generate failed",
+                            Some("AI returned no commit subject.".into()),
+                            cx,
+                        );
+                        return;
+                    }
                     let id = id.clone();
                     let message = m;
                     cx.spawn(async move |this, cx| {
@@ -1908,6 +1925,12 @@ impl OrreryApp {
     /// subject + body fields so it's editable before committing.
     pub fn drawer_generate_commit(&mut self, cx: &mut Context<Self>) {
         if !self.services.ai_ready {
+            self.push_toast(
+                ToastKind::Error,
+                "AI unavailable",
+                Some("Enable Ollama / AI in Settings first.".into()),
+                cx,
+            );
             return;
         }
         let repo = self.drawer.repo.clone();
@@ -1936,6 +1959,16 @@ impl OrreryApp {
                 crate::task::run(async move { orrery_core::ai::commit_message(&id, &diff).await })
                     .await
                     .map(|m| orrery_core::ai::split_commit_message(&m))
+                    .and_then(|(subject, body)| {
+                        if subject.trim().is_empty() {
+                            Err(
+                                "AI returned no commit subject — try again or pick another model."
+                                    .into(),
+                            )
+                        } else {
+                            Ok((subject, body))
+                        }
+                    })
             };
             // `update_in` (not `update`): populating the input fields needs the
             // window InputState::set_value requires.
@@ -1955,10 +1988,17 @@ impl OrreryApp {
                             input.update(cx, |st, cx| st.set_value(body.clone(), window, cx));
                         }
                         this.drawer.commit_suggestion = Some((subject.into(), body.into()));
+                        this.push_toast(
+                            ToastKind::Success,
+                            "Commit message ready",
+                            Some("Review subject/body, then Commit.".into()),
+                            cx,
+                        );
                     }
                     Err(e) => {
                         // Don't put the error into the suggestion card (that
-                        // used to offer a broken "Commit this" on the error).
+                        // used to offer a broken "Commit this" on the error),
+                        // and don't wipe the composer — leave any prior text.
                         this.drawer.commit_suggestion = None;
                         this.push_toast(
                             ToastKind::Error,
