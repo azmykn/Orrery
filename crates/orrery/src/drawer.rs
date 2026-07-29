@@ -13,7 +13,7 @@
 //! markdown note via gpui-component's multiline input).
 
 use gpui::{
-    AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
+    App, AppContext, AsyncApp, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, WeakEntity, div, px, rgb,
     rgba,
 };
@@ -867,7 +867,7 @@ pub fn drawer(
         .child(header(row, t, app))
         .child(tab_bar(tab, t, app, data.repo.clone(), github_slug(row)))
         .child(body(row, tab, t, data, app, ai_ready, github_authed))
-        .child(footer(row, t, ide_cmd, agent_cmd));
+        .child(footer(row, t, app, ide_cmd, agent_cmd));
 
     div()
         .absolute()
@@ -2541,7 +2541,13 @@ fn notes_view(
     col.child(note)
 }
 
-fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElement {
+fn footer(
+    row: &Row,
+    t: &Theme,
+    app: &Entity<OrreryApp>,
+    ide_cmd: &str,
+    agent_cmd: &str,
+) -> impl IntoElement {
     let mut bar = div()
         .flex()
         .flex_row()
@@ -2556,9 +2562,18 @@ fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElem
             true,
             t,
             {
-                let (path, cmd) = (row.id.clone(), ide_cmd.to_string());
-                move || {
-                    let _ = launch::launch(&cmd, &path);
+                let (path, cmd, app) = (row.id.clone(), ide_cmd.to_string(), app.clone());
+                move |cx: &mut App| {
+                    if let Err(e) = launch::launch(&cmd, &path) {
+                        app.update(cx, |this, cx| {
+                            this.push_toast(
+                                ToastKind::Error,
+                                "Couldn't open IDE",
+                                Some(e.into()),
+                                cx,
+                            );
+                        });
+                    }
                 }
             },
         ))
@@ -2568,9 +2583,18 @@ fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElem
             true,
             t,
             {
-                let (path, cmd) = (row.id.clone(), agent_cmd.to_string());
-                move || {
-                    let _ = launch::spawn(&cmd, &path);
+                let (path, cmd, app) = (row.id.clone(), agent_cmd.to_string(), app.clone());
+                move |cx: &mut App| {
+                    if let Err(e) = launch::spawn(&cmd, &path) {
+                        app.update(cx, |this, cx| {
+                            this.push_toast(
+                                ToastKind::Error,
+                                "Couldn't open terminal",
+                                Some(e.into()),
+                                cx,
+                            );
+                        });
+                    }
                 }
             },
         ))
@@ -2580,34 +2604,53 @@ fn footer(row: &Row, t: &Theme, ide_cmd: &str, agent_cmd: &str) -> impl IntoElem
             false,
             t,
             {
-                let path = row.id.clone();
-                move || {
-                    let _ = launch::open(&path);
+                let (path, app) = (row.id.clone(), app.clone());
+                move |cx: &mut App| {
+                    if let Err(e) = launch::open(&path) {
+                        app.update(cx, |this, cx| {
+                            this.push_toast(
+                                ToastKind::Error,
+                                "Couldn't open folder",
+                                Some(e.into()),
+                                cx,
+                            );
+                        });
+                    }
                 }
             },
         ));
     if !row.url.is_empty() {
         let url = row.url.clone();
+        let app = app.clone();
         bar = bar.child(launch_btn(
             "drawer-host",
             lucide("external-link", 15., t.fg1),
             false,
             t,
-            move || {
-                let _ = launch::open(&url);
+            move |cx: &mut App| {
+                if let Err(e) = launch::open(&url) {
+                    app.update(cx, |this, cx| {
+                        this.push_toast(
+                            ToastKind::Error,
+                            "Couldn't open remote",
+                            Some(e.into()),
+                            cx,
+                        );
+                    });
+                }
             },
         ));
     }
     bar
 }
 
-/// A drawer launcher button. `on` runs a side-effecting launch (no app state).
+/// A drawer launcher button. `on` receives `&mut App` so failures can toast.
 fn launch_btn(
     id: &'static str,
     content: impl IntoElement,
     wide: bool,
     t: &Theme,
-    on: impl Fn() + 'static,
+    on: impl Fn(&mut App) + 'static,
 ) -> impl IntoElement {
     let (hov_border, hov_fg) = (t.border_strong, t.fg0);
     let b = div()
@@ -2627,7 +2670,7 @@ fn launch_btn(
         .font_family(MONO)
         .cursor_pointer()
         .hover(move |s| s.border_color(rgb(hov_border)).text_color(rgb(hov_fg)))
-        .on_click(move |_ev, _win, _cx| on())
+        .on_click(move |_ev, _win, cx| on(cx))
         .child(content);
     if wide {
         b.flex_1().min_w(px(0.))

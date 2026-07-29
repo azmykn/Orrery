@@ -25,6 +25,69 @@ fn detect(candidates: &[&str], template: &str) -> Option<String> {
         .map(|c| template.replace("{cmd}", c))
 }
 
+/// Program name of a whitespace-split command template (first token).
+fn template_program(cmd: &str) -> Option<&str> {
+    cmd.split_whitespace().next()
+}
+
+/// True when the template's binary is missing from PATH (stale config).
+fn template_program_missing(cmd: &str) -> bool {
+    match template_program(cmd) {
+        Some(prog) => which::which(prog).is_err(),
+        None => true,
+    }
+}
+
+/// Detect a terminal and build an `agent_command` that opens it in `{path}`
+/// then runs `claude`. Prefers modern Linux terminals (including GNOME Ptyxis).
+pub fn detect_agent_command() -> String {
+    let term = [
+        "kitty",
+        "alacritty",
+        "foot",
+        "wezterm",
+        "ptyxis",
+        "konsole",
+        "gnome-terminal",
+        "xfce4-terminal",
+        "xterm",
+    ]
+    .iter()
+    .find(|t| which::which(t).is_ok())
+    .copied();
+    match term {
+        Some("konsole") => "konsole --workdir {path} -e claude".to_string(),
+        Some("gnome-terminal") => {
+            "gnome-terminal --working-directory={path} -- claude".to_string()
+        }
+        Some("wezterm") => "wezterm start --cwd {path} -- claude".to_string(),
+        // Ptyxis (GNOME's current terminal): `-d` sets cwd; `--` runs the agent.
+        Some("ptyxis") => "ptyxis --new-window -d {path} -- claude".to_string(),
+        Some("xfce4-terminal") => {
+            "xfce4-terminal --working-directory={path} -e claude".to_string()
+        }
+        Some("xterm") => "xterm -e claude".to_string(),
+        Some(t) => format!("{t} --working-directory {{path}} -e claude"),
+        // Last resort — still better than a binary that isn't installed.
+        None => "xdg-terminal-exec claude".to_string(),
+    }
+}
+
+/// If a saved `agent_command` points at a missing binary (common after the
+/// old default `xterm` on GNOME/Ptyxis systems), replace it with a freshly
+/// detected terminal template. Returns true when the config was changed.
+pub fn heal_agent_command(cfg: &mut AppConfig) -> bool {
+    if !template_program_missing(&cfg.agent_command) {
+        return false;
+    }
+    let next = detect_agent_command();
+    if next == cfg.agent_command {
+        return false;
+    }
+    cfg.agent_command = next;
+    true
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         let home = dirs::home_dir()
@@ -36,27 +99,7 @@ impl Default for AppConfig {
             .or_else(|| detect(&["nvim", "vim"], "{cmd} {path}"))
             .unwrap_or_else(|| "xdg-open {path}".to_string());
 
-        // Open the user's terminal at the repo and start a coding agent.
-        let term = [
-            "kitty",
-            "alacritty",
-            "foot",
-            "wezterm",
-            "konsole",
-            "gnome-terminal",
-        ]
-        .iter()
-        .find(|t| which::which(t).is_ok())
-        .copied();
-        let agent_command = match term {
-            Some("konsole") => "konsole --workdir {path} -e claude".to_string(),
-            Some("gnome-terminal") => {
-                "gnome-terminal --working-directory={path} -- claude".to_string()
-            }
-            Some("wezterm") => "wezterm start --cwd {path} -- claude".to_string(),
-            Some(t) => format!("{t} --working-directory {{path}} -e claude"),
-            None => "xterm -e claude".to_string(),
-        };
+        let agent_command = detect_agent_command();
 
         Self {
             roots: vec![home],
@@ -175,6 +218,9 @@ pub fn load() -> AppConfig {
     if seed_pull_only_if_empty(&mut cfg) {
         seeded = true;
     }
+    if heal_agent_command(&mut cfg) {
+        seeded = true;
+    }
     if seeded {
         let _ = save(&cfg);
     }
@@ -227,16 +273,28 @@ mod tests {
             cfg.ide_command.contains("{path}"),
             "ide template needs {{path}}"
         );
-        // The agent command launches the agent; the repo dir comes from the
-        // launcher's working directory (launch::spawn sets current_dir), so
-        // {path} isn't required — and the fallback terminal (xterm) has no
-        // working-dir flag. Asserting {path} here would be env-dependent (it
-        // only appears when a terminal with such a flag is detected).
+        // The agent command launches the agent; most detected terminals also
+        // embed `{path}` as a working-directory flag (ptyxis/kitty/…). The
+        // last-resort `xdg-terminal-exec claude` relies on spawn's current_dir.
         assert!(
             cfg.agent_command.contains("claude"),
             "agent command should launch the agent"
         );
         assert!(!cfg.agent_command.is_empty());
+    }
+
+    #[test]
+    fn heal_replaces_missing_agent_binary() {
+        let mut cfg = AppConfig::default();
+        cfg.agent_command = "definitely-not-a-real-terminal-xyz -e claude".into();
+        assert!(heal_agent_command(&mut cfg));
+        assert!(
+            !template_program_missing(&cfg.agent_command),
+            "healed command should resolve on PATH: {}",
+            cfg.agent_command
+        );
+        // Second heal is a no-op.
+        assert!(!heal_agent_command(&mut cfg));
     }
 
     #[test]

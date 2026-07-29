@@ -599,21 +599,48 @@ pub fn card(
     let id_host = SharedString::from(format!("host-{idx}"));
 
     let ide_action = {
-        let (path, cmd) = (row.id.clone(), ide_cmd.to_string());
+        let (path, cmd, app) = (row.id.clone(), ide_cmd.to_string(), app.clone());
         move |_cx: &mut App| {
-            let _ = launch::launch(&cmd, &path);
+            if let Err(e) = launch::launch(&cmd, &path) {
+                app.update(_cx, |this, cx| {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't open IDE",
+                        Some(e.into()),
+                        cx,
+                    );
+                });
+            }
         }
     };
     let agent_action = {
-        let (path, cmd) = (row.id.clone(), agent_cmd.to_string());
+        let (path, cmd, app) = (row.id.clone(), agent_cmd.to_string(), app.clone());
         move |_cx: &mut App| {
-            let _ = launch::spawn(&cmd, &path);
+            if let Err(e) = launch::spawn(&cmd, &path) {
+                app.update(_cx, |this, cx| {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't open terminal",
+                        Some(e.into()),
+                        cx,
+                    );
+                });
+            }
         }
     };
     let folder_action = {
-        let path = row.id.clone();
+        let (path, app) = (row.id.clone(), app.clone());
         move |_cx: &mut App| {
-            let _ = launch::open(&path);
+            if let Err(e) = launch::open(&path) {
+                app.update(_cx, |this, cx| {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't open folder",
+                        Some(e.into()),
+                        cx,
+                    );
+                });
+            }
         }
     };
 
@@ -892,21 +919,48 @@ pub(crate) fn list_item(
 
     // Launchers — narrow icon buttons.
     let ide_action = {
-        let (path, cmd) = (row.id.clone(), ide_cmd.to_string());
+        let (path, cmd, app) = (row.id.clone(), ide_cmd.to_string(), app.clone());
         move |_cx: &mut App| {
-            let _ = launch::launch(&cmd, &path);
+            if let Err(e) = launch::launch(&cmd, &path) {
+                app.update(_cx, |this, cx| {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't open IDE",
+                        Some(e.into()),
+                        cx,
+                    );
+                });
+            }
         }
     };
     let agent_action = {
-        let (path, cmd) = (row.id.clone(), agent_cmd.to_string());
+        let (path, cmd, app) = (row.id.clone(), agent_cmd.to_string(), app.clone());
         move |_cx: &mut App| {
-            let _ = launch::spawn(&cmd, &path);
+            if let Err(e) = launch::spawn(&cmd, &path) {
+                app.update(_cx, |this, cx| {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't open terminal",
+                        Some(e.into()),
+                        cx,
+                    );
+                });
+            }
         }
     };
     let folder_action = {
-        let path = row.id.clone();
+        let (path, app) = (row.id.clone(), app.clone());
         move |_cx: &mut App| {
-            let _ = launch::open(&path);
+            if let Err(e) = launch::open(&path) {
+                app.update(_cx, |this, cx| {
+                    this.push_toast(
+                        crate::toast::ToastKind::Error,
+                        "Couldn't open folder",
+                        Some(e.into()),
+                        cx,
+                    );
+                });
+            }
         }
     };
     let mut acts = div()
